@@ -504,7 +504,15 @@ def prepare_hmdb51_annotations(root_dir: str, cache_dir: Optional[str] = None) -
         with out_csv.open("w", newline="", encoding="utf-8") as f:
             writer = csv.writer(f)
             for r in rows:
-                video_path = root / split / r["file_name"]
+                # Write ABSOLUTE paths so that downstream ``VideoCSVAnnotation``
+                # (which may receive ``data_root``) does not accidentally
+                # double‑prefix the root directory when resolving relative
+                # paths. Previously we wrote a relative path like
+                #   datasets/hmdb51/validation/xxx.mp4
+                # and then ``VideoCSVAnnotation`` prefixed ``data_root`` again
+                # producing: datasets/hmdb51/datasets/hmdb51/validation/xxx.mp4
+                # which caused missing file / empty frame extraction errors.
+                video_path = (root / split / r["file_name"]).resolve()
                 writer.writerow([str(video_path), label_to_id[r["label"]]])
         out_paths[split] = str(out_csv)
 
