@@ -1,0 +1,13 @@
+torch
+timm
+pytorchvideo
+torchvision
+opencv-python
+scikit-learn
+pillow
+imageio
+imageio-ffmpeg
+matplotlib
+numpy
+tqdm
+lightning
