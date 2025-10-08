@@ -54,6 +54,7 @@ from lightning.pytorch.loggers import CSVLogger
 
 # Import modularized components
 from src.core import GraphSamplerActionModel, VideoDataModule
+from src.core.data import create_datamodule_for
 from src.utils import parse_args
 
 
@@ -127,18 +128,51 @@ def main():
     # Set random seed for reproducibility
     L.seed_everything(args.seed, workers=True)
     
-    # Setup data module
-    dm = VideoDataModule(
-        data_root=args.data_root,
-        train_csv=args.train_anno,
-        val_csv=args.val_anno,
-        test_csv=args.test_anno,
-        frames_per_clip=args.frames_per_clip,
-        batch_size=args.batch_size,
-        num_workers=args.num_workers,
-        frame_cache_dir=args.frame_cache,
-        resize=224,
-    )
+    # Setup data module (support built-in datasets)
+    if args.dataset is not None:
+        dataset_name = args.dataset
+        dm = create_datamodule_for(
+            dataset=dataset_name,
+            root_dir=args.data_root,
+            frames_per_clip=args.frames_per_clip,
+            batch_size=args.batch_size,
+            num_workers=args.num_workers,
+            frame_cache_dir=args.frame_cache,
+            resize=224,
+            cache_dir=args.anno_cache,
+            diving48_train_json=args.diving48_train_json,
+            diving48_test_json=args.diving48_test_json,
+            diving48_val_ratio=getattr(args, 'diving48_val_ratio', 0.1),
+        )
+        # Infer num_classes if not provided
+        if args.num_classes is None:
+            # Try to read mapping json in cache dir
+            mapping_file = None
+            if dataset_name.lower() == 'hmdb51':
+                mapping_file = Path(args.anno_cache) / 'hmdb51_label_mapping.json'
+            elif dataset_name.lower() == 'diving48':
+                mapping_file = Path(args.anno_cache) / 'diving48_label_mapping.json'
+            if mapping_file and mapping_file.is_file():
+                import json
+                with mapping_file.open('r', encoding='utf-8') as f:
+                    mapping = json.load(f)
+                if 'label_to_id' in mapping:
+                    args.num_classes = len(mapping['label_to_id'])
+    else:
+        dm = VideoDataModule(
+            data_root=args.data_root,
+            train_csv=args.train_anno,
+            val_csv=args.val_anno,
+            test_csv=args.test_anno,
+            frames_per_clip=args.frames_per_clip,
+            batch_size=args.batch_size,
+            num_workers=args.num_workers,
+            frame_cache_dir=args.frame_cache,
+            resize=224,
+        )
+
+    if args.num_classes is None:
+        raise ValueError('Could not determine num_classes. Specify --num-classes or rely on built-in dataset mapping.')
     
     # Setup model
     model = GraphSamplerActionModel(

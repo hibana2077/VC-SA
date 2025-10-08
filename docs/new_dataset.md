@@ -44,4 +44,72 @@ eat_Crash_eat_h_cm_np1_fr_med_11,eat_Crash_eat_h_cm_np1_fr_med_11.mp4,eat,Crash_
 
 ### Download the dataset
 
+Using curl
 
+```bash
+curl -L -o Diving48_rgb.tar.gz https://huggingface.co/datasets/bkprocovid19/diving48/resolve/main/Diving48_rgb.tar.gz?download=true
+tar -xzvf Diving48_rgb.tar.gz # output folder rgb
+```
+
+Need to using label file from:
+
+- "../src/core/constant/Div48/Diving48_V2_test.json"
+- "../src/core/constant/Div48/Diving48_V2_train.json"
+- "../src/core/constant/Div48/Diving48_vocab.json"
+
+### Dataset Structure
+
+```
+rgb/
+├── 2x00lRzlTVQ_00000.mp4
+├── 2x00lRzlTVQ_00001.mp4
+└── ...
+```
+
+### Label Format
+
+#### Diving48_V2_train.json
+
+```json
+[
+  {
+    "vid_name": "-mmq0PT-u8k_00155",
+    "label": 0,
+    "start_frame": 0,
+    "end_frame": 48
+  },
+  {
+    "vid_name": "-mmq0PT-u8k_00156",
+    "label": 0,
+    "start_frame": 0,
+    "end_frame": 70
+  },
+    ...
+]
+```
+
+#### Diving48_vocab.json
+
+```json
+[
+  [
+    "Back", 
+    "15som", 
+    "05Twis", 
+    "FREE"
+  ], 
+  [
+    "Back", 
+    "15som", 
+    "15Twis", 
+    "FREE"
+  ], 
+  [
+    "Back", 
+    "15som", 
+    "25Twis", 
+    "FREE"
+  ],
+    ...
+]
+```

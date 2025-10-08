@@ -60,23 +60,56 @@ def parse_args() -> argparse.Namespace:
         default='.',
         help='Root directory to prepend to relative video paths in CSV'
     )
+    # Built-in dataset selector (hmdb51 / diving48) OR provide explicit CSVs below
+    data_group.add_argument(
+        '--dataset',
+        type=str,
+        default=None,
+        choices=['hmdb51', 'diving48'],
+        help='Name of built-in dataset to auto-generate annotation CSVs (overrides --train-anno/--val-anno/--test-anno)'
+    )
+    data_group.add_argument(
+        '--anno-cache',
+        type=str,
+        default='.cache_annotations',
+        help='Directory to store generated annotation CSV/mapping when using --dataset'
+    )
     data_group.add_argument(
         '--train-anno',
         type=str,
-        required=True,
-        help='Path to training annotation CSV file'
+        default=None,
+        help='Path to training annotation CSV file (ignored if --dataset used)'
     )
     data_group.add_argument(
         '--val-anno',
         type=str,
-        required=True,
-        help='Path to validation annotation CSV file'
+        default=None,
+        help='Path to validation annotation CSV file (ignored if --dataset used)'
     )
     data_group.add_argument(
         '--test-anno',
         type=str,
-        required=True,
-        help='Path to test annotation CSV file'
+        default=None,
+        help='Path to test annotation CSV file (ignored if --dataset used)'
+    )
+    # Diving48 specific optional overrides
+    data_group.add_argument(
+        '--diving48-train-json',
+        type=str,
+        default=None,
+        help='Override path to Diving48_V2_train.json (only if --dataset diving48/div48)'
+    )
+    data_group.add_argument(
+        '--diving48-test-json',
+        type=str,
+        default=None,
+        help='Override path to Diving48_V2_test.json (only if --dataset diving48/div48)'
+    )
+    data_group.add_argument(
+        '--diving48-val-ratio',
+        type=float,
+        default=0.1,
+        help='Validation ratio split when auto-generating Diving48 annotations'
     )
     data_group.add_argument(
         '--frame-cache',
@@ -90,8 +123,8 @@ def parse_args() -> argparse.Namespace:
     model_group.add_argument(
         '--num-classes',
         type=int,
-        required=True,
-        help='Number of action classes'
+        default=None,
+        help='Number of action classes (optional if --dataset used; will be inferred)'
     )
     model_group.add_argument(
         '--frames-per-clip',
@@ -259,7 +292,23 @@ def parse_args() -> argparse.Namespace:
         help='Distributed training strategy (auto, ddp, ddp_spawn, etc.)'
     )
     
-    return p.parse_args()
+    args = p.parse_args()
+
+    # Canonicalize dataset aliases
+    # (Alias removed) Only canonical names accepted now.
+
+    # ---- Post-parse validation ----
+    if args.dataset is None:
+        missing = [n for n in ['train_anno', 'val_anno', 'test_anno'] if getattr(args, n) is None]
+        if missing:
+            p.error(f"Missing annotation CSV(s): {missing}. Provide them or use --dataset.")
+        if args.num_classes is None:
+            p.error('--num-classes is required when not using --dataset')
+    else:
+        # If dataset chosen, CSV paths are auto-generated; ignore user-provided ones
+        pass
+
+    return args
 
 
 def get_default_config() -> dict:
@@ -274,10 +323,18 @@ def get_default_config() -> dict:
     return {
         # Data
         'data_root': '.',
+    'dataset': None,
+    'anno_cache': '.cache_annotations',
         'frame_cache': None,
+    'train_anno': None,
+    'val_anno': None,
+    'test_anno': None,
+    'diving48_train_json': None,
+    'diving48_test_json': None,
+    'diving48_val_ratio': 0.1,
         
         # Model
-        'num_classes': 400,
+    'num_classes': None,
         'frames_per_clip': 16,
         'frame_topk': 8,
         'token_topk': 32,
