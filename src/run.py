@@ -134,6 +134,58 @@ class PeriodicPrinterCallback(L.Callback):
         print(' | '.join(pieces), flush=True)
 
 
+class EpochSummaryPrinter(L.Callback):
+    """Callback to print a concise metric summary once每個 epoch 結束.
+
+    行為:
+      * 在 validation epoch 結束後 (on_validation_epoch_end) 輸出彙總 metrics
+      * 若沒有 validation (沒有 val dataloader) 則在 on_train_epoch_end 輸出 (避免重複)
+    列印內容包含: epoch, 監控的常見指標 (train/acc, train/loss, val/acc, val/loss,
+    epoch_test/acc, epoch_test/loss, test/acc, test/loss) 以及第一個 optimizer 的 lr。
+    """
+    def __init__(self, extra_keys: list[str] | None = None):
+        super().__init__()
+        self.default_keys = [
+            'train/acc', 'train/loss',
+            'val/acc', 'val/loss',
+            'epoch_test/acc', 'epoch_test/loss',
+            'test/acc', 'test/loss'
+        ]
+        self.extra_keys = extra_keys or []
+
+    def _print_summary(self, trainer: L.Trainer):
+        metrics = trainer.callback_metrics
+        epoch = trainer.current_epoch
+        pieces = [f"[EpochSummary] epoch={epoch}"]
+        for key in self.default_keys + self.extra_keys:
+            if key in metrics:
+                val = metrics[key]
+                try:
+                    val = float(val)
+                    pieces.append(f"{key}={val:.4f}")
+                except Exception:
+                    pieces.append(f"{key}={val}")
+        # learning rate
+        if trainer.optimizers:
+            try:
+                lr = trainer.optimizers[0].param_groups[0].get('lr')
+                if lr is not None:
+                    pieces.append(f"lr={lr:.2e}")
+            except Exception:
+                pass
+        print(' | '.join(pieces), flush=True)
+
+    def on_validation_epoch_end(self, trainer: L.Trainer, pl_module):  # type: ignore
+        # 有 validation -> 在此列印
+        if sum(trainer.num_val_batches) > 0:  # type: ignore[attr-defined]
+            self._print_summary(trainer)
+
+    def on_train_epoch_end(self, trainer: L.Trainer, pl_module):  # type: ignore
+        # 沒有 validation -> 在 train epoch end 列印 (避免重複)
+        if sum(trainer.num_val_batches) == 0:  # type: ignore[attr-defined]
+            self._print_summary(trainer)
+
+
 def setup_trainer(args, monitor_metric: str) -> L.Trainer:
     """
     Setup PyTorch Lightning Trainer.
@@ -150,6 +202,8 @@ def setup_trainer(args, monitor_metric: str) -> L.Trainer:
     # Inject periodic printer when tqdm disabled and interval specified
     if getattr(args, 'no_tqdm', False) and getattr(args, 'print_interval', 0) > 0:
         callbacks.append(PeriodicPrinterCallback(args.print_interval))
+    # Always add epoch summary printer for clear per-epoch aggregated metrics
+    callbacks.append(EpochSummaryPrinter())
     
     # Determine accelerator
     if args.devices > 0 and torch.cuda.is_available():

@@ -189,8 +189,11 @@ class GraphSamplerActionModel(L.LightningModule):
         
         # Classification head
         self.cls_head = nn.Sequential(
-            nn.LayerNorm(d_model),
-            nn.Linear(d_model, num_classes)
+            nn.RMSNorm(d_model),
+            nn.Linear(d_model, 2*d_model),
+            nn.GELU(),
+            nn.Dropout(0.1),
+            nn.Linear(2*d_model, num_classes),
         )
         
         # Loss function
