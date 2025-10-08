@@ -125,6 +125,7 @@ def setup_trainer(args, monitor_metric: str) -> L.Trainer:
         callbacks=callbacks,
         log_every_n_steps=10,
         deterministic=False,
+        gradient_clip_val=1.0,
     )
     
     return trainer
