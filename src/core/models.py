@@ -22,7 +22,13 @@ import lightning as L
 from pathlib import Path
 import sys
 
-from .components import FrameTokenCoSelector, GraphBasedMemBank
+from .components import (
+    FrameTokenCoSelector,
+    GraphBasedMemBank,
+    FPSChangePointSelector,
+    LatentCrossAttnMemBank,
+    TemporalConvMemBank,
+)
 
 
 class ViTTokenBackbone(nn.Module):
@@ -142,6 +148,13 @@ class GraphSamplerActionModel(L.LightningModule):
         use_gat: bool = True,
         label_smoothing: float = 0.0,
         test_each_epoch: bool = True,
+        # New options for alternative modules
+        selector_type: str = 'learnable',  # 'learnable' | 'fps'
+        membank_type: str = 'graph',       # 'graph' | 'latent' | 'tcn'
+        latent_slots: int = 64,
+        latent_heads: int = 8,
+        tcn_kernel: int = 5,
+        tcn_dilations: tuple = (1, 2, 4),
     ):
         super().__init__()
         self.save_hyperparameters()
@@ -162,24 +175,50 @@ class GraphSamplerActionModel(L.LightningModule):
             frame_topk, frames_per_clip
         )
         
-        # Initialize frame and token selector
-        self.co_selector = FrameTokenCoSelector(
-            d_model=d_model,
-            frame_topk=frame_topk,
-            token_topk=token_topk,
-            use_cls=False,
-            tau_frame=tau_frame,
-            tau_token=tau_token,
-        )
-        
-        # Initialize graph-based temporal memory
-        self.graph_mem = GraphBasedMemBank(
-            d_model=d_model,
-            knn_k=graph_knn,
-            temporal_window=graph_tw,
-            num_layers=graph_layers,
-            use_gat=use_gat,
-        )
+        # Initialize frame/token selector (choose type)
+        if selector_type.lower() == 'learnable':
+            self.co_selector = FrameTokenCoSelector(
+                d_model=d_model,
+                frame_topk=frame_topk,
+                token_topk=token_topk,
+                use_cls=False,
+                tau_frame=tau_frame,
+                tau_token=tau_token,
+            )
+        elif selector_type.lower() == 'fps':
+            self.co_selector = FPSChangePointSelector(
+                d_model=d_model,
+                frame_topk=frame_topk,
+                token_topk=token_topk,
+                use_cls=False,
+                ema_alpha=0.9,
+            )
+        else:
+            raise ValueError(f"Unsupported selector_type: {selector_type}")
+
+        # Initialize temporal memory bank (choose type)
+        if membank_type.lower() == 'graph':
+            self.mem_bank = GraphBasedMemBank(
+                d_model=d_model,
+                knn_k=graph_knn,
+                temporal_window=graph_tw,
+                num_layers=graph_layers,
+                use_gat=use_gat,
+            )
+        elif membank_type.lower() == 'latent':
+            self.mem_bank = LatentCrossAttnMemBank(
+                d_model=d_model,
+                num_latents=latent_slots,
+                num_heads=latent_heads,
+            )
+        elif membank_type.lower() == 'tcn':
+            self.mem_bank = TemporalConvMemBank(
+                d_model=d_model,
+                kernel_size=tcn_kernel,
+                dilations=tcn_dilations,
+            )
+        else:
+            raise ValueError(f"Unsupported membank_type: {membank_type}")
         
         # Classification head
         self.cls_head = nn.Sequential(
@@ -278,9 +317,12 @@ class GraphSamplerActionModel(L.LightningModule):
         # Select important frames and tokens
         z, frame_idx, token_idx, frame_mask, token_mask = self.co_selector(tokens)
         
-        # Apply graph-based temporal modeling
+        # Apply temporal modeling via selected memory bank
         # z has shape [B, T', M, D] where T' = frame_topk, M = token_topk
-        h, _ = self.graph_mem(z, reset_memory=True)
+        if isinstance(self.mem_bank, GraphBasedMemBank):
+            h, _ = self.mem_bank(z, reset_memory=True)
+        else:
+            h, _ = self.mem_bank(z)
         
         # Global average pooling over time and tokens
         feat = h.mean(dim=(1, 2))  # [B, D]

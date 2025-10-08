@@ -220,6 +220,10 @@ def main():
         use_gat=not args.no_gat,
         label_smoothing=args.label_smoothing,
         test_each_epoch=args.test_each_epoch,
+        selector_type='fps',       # 或 'learnable'
+		membank_type='latent',     # 'graph' | 'latent' | 'tcn'
+		latent_slots=64,
+		latent_heads=8
     )
     
     # Setup trainer
