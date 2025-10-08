@@ -19,6 +19,7 @@ import json
 import random
 from pathlib import Path
 from typing import List, Optional
+import warnings
 
 import torch
 from torch.utils.data import Dataset, DataLoader
@@ -301,17 +302,123 @@ class SimpleVideoDataset(Dataset):
         return frames
     
     def _load_from_video(self, video_path: str) -> List[torch.Tensor]:
-        """Load frames directly from video file."""
-        video, _, _ = read_video(video_path, pts_unit='sec')  # [T,H,W,C]
+        """Load frames directly from video file with multi-backend fallback.
+
+        Order tried:
+          1. torchvision.read_video (pts_unit='sec')
+          2. torchvision.read_video (pts_unit='pts') if 0 frames
+          3. PyAV (if installed) - slower but robust
+          4. OpenCV (if installed)
+
+        Raises:
+            RuntimeError with detailed diagnostics if all backends fail / return 0 frames.
+        """
+
+        def _torchvision_decode(path: str):
+            try:
+                v, _, info = read_video(path, pts_unit='sec')
+                if v.shape[0] == 0:  # fallback to pts
+                    v2, _, info2 = read_video(path, pts_unit='pts')
+                    if v2.shape[0] > 0:
+                        return v2, info2, 'torchvision(read_video,pts)'
+                else:
+                    return v, info, 'torchvision(read_video,sec)'
+                return v, info, 'torchvision(read_video,sec-empty)'
+            except Exception as e:
+                return None, {'error': str(e)}, 'torchvision-exception'
+
+        def _pyav_decode(path: str):
+            try:
+                import av  # type: ignore
+            except ImportError:
+                return None, {'error': 'pyav-not-installed'}, 'pyav-missing'
+            try:
+                container = av.open(path)
+                stream = container.streams.video[0]
+                frames = []
+                for frame in container.decode(stream):
+                    arr = frame.to_rgb().to_ndarray()
+                    frames.append(torch.from_numpy(arr))  # [H,W,C]
+                if frames:
+                    video = torch.stack(frames, 0)
+                else:
+                    video = torch.empty((0,))
+                return video, {'pyav_frames': len(frames)}, 'pyav'
+            except Exception as e:
+                return None, {'error': str(e)}, 'pyav-exception'
+
+        def _opencv_decode(path: str):
+            try:
+                import cv2  # type: ignore
+            except ImportError:
+                return None, {'error': 'opencv-not-installed'}, 'opencv-missing'
+            try:
+                cap = cv2.VideoCapture(path)
+                frames = []
+                ok = cap.isOpened()
+                while ok:
+                    ret, frame = cap.read()
+                    if not ret:
+                        break
+                    frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                    frames.append(torch.from_numpy(frame))
+                cap.release()
+                if frames:
+                    video = torch.stack(frames, 0)
+                else:
+                    video = torch.empty((0,))
+                return video, {'opencv_frames': len(frames)}, 'opencv'
+            except Exception as e:
+                return None, {'error': str(e)}, 'opencv-exception'
+
+        attempts = []
+        video, info, backend = _torchvision_decode(video_path)
+        attempts.append((backend, (None if isinstance(info, dict) and 'error' in info else info), info))
+        if video is None or (hasattr(video, 'shape') and video.shape[0] == 0):
+            pv_video, pv_info, pv_backend = _pyav_decode(video_path)
+            attempts.append((pv_backend, pv_info, pv_info))
+            if pv_video is not None and getattr(pv_video, 'shape', [0])[0] > 0:
+                video, info, backend = pv_video, pv_info, pv_backend
+        if video is None or (hasattr(video, 'shape') and video.shape[0] == 0):
+            ocv_video, ocv_info, ocv_backend = _opencv_decode(video_path)
+            attempts.append((ocv_backend, ocv_info, ocv_info))
+            if ocv_video is not None and getattr(ocv_video, 'shape', [0])[0] > 0:
+                video, info, backend = ocv_video, ocv_info, ocv_backend
+
+        if video is None or (hasattr(video, 'shape') and video.shape[0] == 0):
+            # Collect diagnostics
+            try:
+                file_size = os.path.getsize(video_path)
+            except OSError:
+                file_size = -1
+            try:
+                import torchvision.io.video as _tvid
+                has_video_opt = getattr(_tvid, '_has_video_opt', lambda: 'N/A')()
+            except Exception:
+                has_video_opt = 'error'
+            diag = {
+                'attempts': attempts,
+                'file_size': file_size,
+                'torchvision_has_video_opt': has_video_opt,
+                'path': video_path,
+            }
+            raise RuntimeError(
+                "Failed to decode video (no frames) after fallbacks. "
+                f"Diagnostics: {diag}. Consider installing system ffmpeg or rebuilding torchvision with ffmpeg."
+            )
+
+        # video is a tensor [T,H,W,C] uint8 or int
+        if video.dtype != torch.uint8:
+            video = video.to(torch.uint8)
         total = video.shape[0]
         idxs = self._sample_indices(total)
-        frames = []
-        
+        frames: List[torch.Tensor] = []
         for i in idxs:
-            frame = video[i]  # [H,W,C]
+            frame = video[i]
             pil = transforms.functional.to_pil_image(frame)
             frames.append(self.tx(pil))
-        
+        if backend != 'torchvision(read_video,sec)' and backend != 'torchvision(read_video,pts)':
+            warnings.warn(f"Video {video_path} decoded using fallback backend {backend}")
         return frames
     
     def __len__(self) -> int:
