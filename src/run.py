@@ -114,6 +114,9 @@ def setup_trainer(args, monitor_metric: str) -> L.Trainer:
     else:
         accelerator = 'cpu'
     
+    # Control progress bar display
+    enable_progress_bar = not getattr(args, 'no_tqdm', False)
+    
     trainer = L.Trainer(
         max_epochs=args.max_epochs,
         devices=args.devices if args.devices > 0 else None,
@@ -126,6 +129,7 @@ def setup_trainer(args, monitor_metric: str) -> L.Trainer:
         log_every_n_steps=10,
         deterministic=False,
         gradient_clip_val=10.0,
+        enable_progress_bar=enable_progress_bar,
     )
     
     return trainer

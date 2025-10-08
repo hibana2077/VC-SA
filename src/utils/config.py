@@ -286,6 +286,11 @@ def parse_args() -> argparse.Namespace:
         action='store_true',
         help='Suppress Python FutureWarning messages'
     )
+    log_group.add_argument(
+        '--no-tqdm',
+        action='store_true',
+        help='Disable tqdm progress bars'
+    )
     
     # ===== Hardware =====
     hw_group = p.add_argument_group('Hardware')
