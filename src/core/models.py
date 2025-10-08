@@ -307,15 +307,23 @@ class GraphSamplerActionModel(L.LightningModule):
         
         return loss
 
-    def on_after_backward(self):
-        """Log gradient norms after backward pass."""
-        total_norm = 0.0
+    def _grad_global_norm(self) -> float:
+        total = 0.0
         for p in self.parameters():
             if p.grad is not None:
                 param_norm = p.grad.data.norm(2)
-                total_norm += param_norm.item() ** 2
-        total_norm = total_norm ** 0.5
-        self.log('train/grad_norm', total_norm, on_step=True, on_epoch=True, prog_bar=True)
+                total += param_norm.item() ** 2
+        return total ** 0.5
+
+    def on_after_backward(self):
+        # 记录未裁剪前的梯度范数（如果你还想保留）
+        pre = self._grad_global_norm()
+        self.log('train/grad_norm_pre_clip', pre, on_step=True, prog_bar=True)
+
+    def on_after_optimizer_step(self, optimizer):
+        # 这里已经裁剪完成
+        post = self._grad_global_norm()
+        self.log('train/grad_norm_post_clip', post, on_step=True, prog_bar=False)
     
     def validation_step(self, batch, batch_idx):
         """Validation step."""
