@@ -265,16 +265,17 @@ def main():
         freeze_backbone=args.freeze_backbone,
         tau_frame=args.tau_frame,
         tau_token=args.tau_token,
-        graph_knn=args.graph_knn,
+        graph_knn=args.graph_knn,  # (legacy args kept for backward CLI compatibility, unused)
         graph_tw=args.graph_tw,
         graph_layers=args.graph_layers,
         use_gat=not args.no_gat,
         label_smoothing=args.label_smoothing,
         test_each_epoch=args.test_each_epoch,
-        selector_type='fps',       # 或 'learnable'
-		membank_type='latent',     # 'graph' | 'latent' | 'tcn'
-		latent_slots=64,
-		latent_heads=8
+        lambda_cov=1.0,
+        lambda_score=0.0,
+        mem_use_arp=True,
+        mem_window=8,
+        mem_alpha=0.5,
     )
     
     # Setup trainer
