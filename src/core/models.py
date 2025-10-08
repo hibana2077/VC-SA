@@ -301,6 +301,16 @@ class GraphSamplerActionModel(L.LightningModule):
         self.log('train/acc', acc, prog_bar=True, on_step=True, on_epoch=True)
         
         return loss
+
+    def on_after_backward(self):
+        """Log gradient norms after backward pass."""
+        total_norm = 0.0
+        for p in self.parameters():
+            if p.grad is not None:
+                param_norm = p.grad.data.norm(2)
+                total_norm += param_norm.item() ** 2
+        total_norm = total_norm ** 0.5
+        self.log('train/grad_norm', total_norm, on_step=True, on_epoch=True, prog_bar=True)
     
     def validation_step(self, batch, batch_idx):
         """Validation step."""
