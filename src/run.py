@@ -116,6 +116,7 @@ class PeriodicPrinterCallback(L.Callback):
         for key in [
             'train/loss', 'loss', 'train_loss',
             'train/acc', 'val/acc', 'test/acc',
+            'train/grad_norm'
         ]:
             if key in metrics:
                 val = metrics[key]
