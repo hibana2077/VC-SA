@@ -415,55 +415,38 @@ class SimpleVideoDataset(Dataset):
         frames: List[torch.Tensor] = []
         for i in idxs:
             frame = video[i]
-            # --- Robust shape/channel sanitation ---------------------------------
-            # Expected acceptable shapes for a single frame:
-            #   [H, W, C]  (C in {1,3,4})
-            #   [C, H, W]  (C in {1,3,4})
-            # Some backends / edge cases (or inadvertent dim ordering) may yield
-            # permutations like [W, C, H] or other orders where neither the first
-            # nor last dim is in {1,3,4}. This caused the observed error where
-            # torchvision's to_pil_image() interpreted the last dim (e.g. 240 = H)
-            # as channels: "pic should not have > 4 channels".
-            # We attempt to automatically recover by detecting a single dim in
-            # {1,3,4} and moving it to the end (HWC) before converting.
-            if isinstance(frame, torch.Tensor):
-                if frame.ndim != 3:
-                    raise ValueError(f"Decoded frame must be 3D, got shape {tuple(frame.shape)}")
-                h, w, c = None, None, None
-                shape = list(frame.shape)
-                # Case 1: already HWC
-                if shape[-1] in (1, 3, 4):
-                    pass  # OK
-                # Case 2: CHW -> permute to HWC
-                elif shape[0] in (1, 3, 4):
-                    frame = frame.permute(1, 2, 0).contiguous()
-                else:
-                    # Try to locate a channel-like dim somewhere else
-                    channel_candidates = [d for d, s in enumerate(shape) if s in (1, 3, 4)]
-                    if channel_candidates:
-                        cdim = channel_candidates[0]
-                        # Move channel dim to end preserving order of others
-                        order = [d for d in range(3) if d != cdim] + [cdim]
-                        frame = frame.permute(order).contiguous()
-                    else:
-                        # Fallback heuristic: assume smallest dim is channel
-                        cdim = int(torch.tensor(shape).argmin().item())
-                        if shape[cdim] > 4:
-                            raise ValueError(
-                                "Unable to infer channel dimension for frame shape {} (no dim in {1,3,4})".format(
-                                    shape
-                                )
-                            )
-                        order = [d for d in range(3) if d != cdim] + [cdim]
-                        frame = frame.permute(order).contiguous()
-
-                # At this point last dim should be channel
-                if frame.shape[-1] not in (1, 3, 4):
-                    raise ValueError(
-                        f"Sanitization failed; frame shape after permute {tuple(frame.shape)} does not end with channels."
-                    )
-            else:
+            # --- Minimal & robust channel ordering fix (ensure HWC with C in {1,3,4}) ---
+            if not isinstance(frame, torch.Tensor):
                 raise TypeError(f"Expected frame tensor, got {type(frame)}")
+            if frame.ndim != 3:
+                raise ValueError(f"Decoded frame must be 3D, got shape {tuple(frame.shape)}")
+
+            # Fast path: already HWC
+            if frame.shape[-1] in (1, 3, 4):
+                pass
+            # CHW -> HWC
+            elif frame.shape[0] in (1, 3, 4) and frame.shape[1] > 4 and frame.shape[2] > 4:
+                frame = frame.permute(1, 2, 0).contiguous()
+            else:
+                # Locate any dim that looks like channel count
+                chan_dim = None
+                for d in range(3):
+                    if frame.shape[d] in (1, 3, 4):
+                        chan_dim = d
+                        break
+                if chan_dim is None:
+                    # Fall back: treat smallest dim as channel if <=4
+                    smallest_dim = int(torch.tensor(frame.shape).argmin().item())
+                    if frame.shape[smallest_dim] <= 4:
+                        chan_dim = smallest_dim
+                if chan_dim is not None and chan_dim != 2:
+                    order = [d for d in range(3) if d != chan_dim] + [chan_dim]
+                    frame = frame.permute(order).contiguous()
+
+            if frame.shape[-1] not in (1, 3, 4):
+                raise ValueError(
+                    f"Unable to coerce frame to HWC with valid channel dim. Final shape={tuple(frame.shape)}"
+                )
 
             # Convert to uint8 if necessary for PIL
             if frame.dtype != torch.uint8:
