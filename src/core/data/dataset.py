@@ -289,7 +289,9 @@ class SimpleVideoDataset(Dataset):
                 frame_to_pil = frame
 
             try:
-                pil = transforms.functional.to_pil_image(frame_to_pil)
+                # Ensure frame is in CHW format for to_pil_image
+                frame_for_pil = frame_to_pil.permute(2, 0, 1).contiguous()
+                pil = transforms.functional.to_pil_image(frame_for_pil)
             except Exception as e:
                 raise RuntimeError(
                     f"Failed to convert frame to PIL. Original shape before tx: {tuple(frame.shape)}; error: {e}"
