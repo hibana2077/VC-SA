@@ -46,6 +46,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+import warnings
 
 import torch
 import lightning as L
@@ -58,7 +59,7 @@ from src.core.data import create_datamodule_for
 from src.utils import parse_args
 
 
-def setup_callbacks(output_dir: str, project_name: str):
+def setup_callbacks(output_dir: str, project_name: str, monitor_metric: str = 'val/acc'):
     """
     Setup PyTorch Lightning callbacks.
     
@@ -69,22 +70,31 @@ def setup_callbacks(output_dir: str, project_name: str):
     Returns:
         List of callback instances
     """
-    ckpt_cb = ModelCheckpoint(
+    filename_tmpl = 'epoch{epoch:02d}'
+    if monitor_metric == 'val/acc':
+        filename_tmpl += '-val_acc{val/acc:.3f}'
+    elif monitor_metric == 'test/acc':
+        filename_tmpl += '-test_acc{test/acc:.3f}'
+    elif monitor_metric == 'train/acc':
+        filename_tmpl += '-train_acc{train/acc:.3f}'
+
+    ckpt_kwargs = dict(
         dirpath=os.path.join(output_dir, project_name, 'checkpoints'),
-        filename='epoch{epoch:02d}-val_acc{val/acc:.3f}',
-        monitor='val/acc',
+        filename=filename_tmpl,
+        monitor=monitor_metric,
         mode='max',
         save_top_k=3,
         save_last=True,
         auto_insert_metric_name=False,
     )
+    ckpt_cb = ModelCheckpoint(**ckpt_kwargs)
     
     lr_cb = LearningRateMonitor(logging_interval='epoch')
     
     return [ckpt_cb, lr_cb]
 
 
-def setup_trainer(args) -> L.Trainer:
+def setup_trainer(args, monitor_metric: str) -> L.Trainer:
     """
     Setup PyTorch Lightning Trainer.
     
@@ -96,7 +106,7 @@ def setup_trainer(args) -> L.Trainer:
     """
     os.makedirs(args.output, exist_ok=True)
     logger = CSVLogger(save_dir=args.output, name=args.project)
-    callbacks = setup_callbacks(args.output, args.project)
+    callbacks = setup_callbacks(args.output, args.project, monitor_metric=monitor_metric)
     
     # Determine accelerator
     if args.devices > 0 and torch.cuda.is_available():
@@ -124,6 +134,10 @@ def main():
     """Main training function."""
     # Parse arguments
     args = parse_args()
+
+    # Suppress FutureWarnings if requested
+    if getattr(args, 'no_future_warning', False):
+        warnings.filterwarnings('ignore', category=FutureWarning)
     
     # Set random seed for reproducibility
     L.seed_everything(args.seed, workers=True)
@@ -143,6 +157,7 @@ def main():
             diving48_train_json=args.diving48_train_json,
             diving48_test_json=args.diving48_test_json,
             diving48_val_ratio=getattr(args, 'diving48_val_ratio', 0.1),
+            use_test_as_val=getattr(args, 'use_test_as_val', False),
         )
         # Infer num_classes if not provided
         if args.num_classes is None:
@@ -174,6 +189,17 @@ def main():
     if args.num_classes is None:
         raise ValueError('Could not determine num_classes. Specify --num-classes or rely on built-in dataset mapping.')
     
+    # Decide which metric to monitor
+    monitor_metric = 'val/acc'
+    if getattr(args, 'use_test_as_val', False) and args.dataset is not None:
+        # Validation shares test -> trainer will log test metrics only during explicit test stage.
+        # We alias validation to test inside datamodule, so metrics emitted should still be 'val/acc'.
+        # If no separate val_set was created, we fallback to 'train/acc' during training for checkpointing.
+        # Check if datamodule actually has val_dataloader
+        has_val = dm.val_dataloader() is not None
+        if not has_val:
+            monitor_metric = 'train/acc'
+
     # Setup model
     model = GraphSamplerActionModel(
         num_classes=args.num_classes,
@@ -196,7 +222,7 @@ def main():
     )
     
     # Setup trainer
-    trainer = setup_trainer(args)
+    trainer = setup_trainer(args, monitor_metric=monitor_metric)
     
     # Train
     trainer.fit(model, datamodule=dm)

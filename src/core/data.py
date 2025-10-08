@@ -355,13 +355,14 @@ class VideoDataModule(L.LightningDataModule):
         self,
         data_root: str,
         train_csv: str,
-        val_csv: str,
+        val_csv: Optional[str],
         test_csv: str,
         frames_per_clip: int,
         batch_size: int,
         num_workers: int = 4,
         frame_cache_dir: Optional[str] = None,
         resize: int = 224,
+        use_test_as_val: bool = False,
     ):
         super().__init__()
         self.save_hyperparameters()
@@ -379,15 +380,26 @@ class VideoDataModule(L.LightningDataModule):
                 is_train=True,
                 resize=h.resize,
             )
-            self.val_set = SimpleVideoDataset(
-                VideoCSVAnnotation(h.val_csv, h.data_root),
-                h.frames_per_clip,
-                self.frame_cache,
-                is_train=False,
-                resize=h.resize,
-            )
+            if h.val_csv is not None:
+                self.val_set = SimpleVideoDataset(
+                    VideoCSVAnnotation(h.val_csv, h.data_root),
+                    h.frames_per_clip,
+                    self.frame_cache,
+                    is_train=False,
+                    resize=h.resize,
+                )
+            elif h.use_test_as_val:
+                # Build test set early and alias as validation
+                self.test_set = SimpleVideoDataset(
+                    VideoCSVAnnotation(h.test_csv, h.data_root),
+                    h.frames_per_clip,
+                    self.frame_cache,
+                    is_train=False,
+                    resize=h.resize,
+                )
+                self.val_set = self.test_set
         
-        if stage in (None, 'test', 'predict'):
+        if stage in (None, 'test', 'predict') and not hasattr(self, 'test_set'):
             self.test_set = SimpleVideoDataset(
                 VideoCSVAnnotation(h.test_csv, h.data_root),
                 h.frames_per_clip,
@@ -408,7 +420,9 @@ class VideoDataModule(L.LightningDataModule):
         )
     
     def val_dataloader(self):
-        """Create validation dataloader."""
+        """Create validation dataloader (optional)."""
+        if not hasattr(self, 'val_set'):
+            return None
         return DataLoader(
             self.val_set,
             batch_size=self.hparams.batch_size,
@@ -432,7 +446,7 @@ class VideoDataModule(L.LightningDataModule):
 # Dataset preparation utilities for fixed (built-in) datasets
 # ---------------------------------------------------------------------------
 
-HMDB51_SPLITS = ["train", "validation", "test"]
+HMDB51_SPLITS = ["train", "test"]  # validation split removed per user request
 
 
 def _ensure_cache_dir(cache_dir: Optional[str]) -> Path:
@@ -497,32 +511,18 @@ def prepare_hmdb51_annotations(root_dir: str, cache_dir: Optional[str] = None) -
     with mapping_file.open("w", encoding="utf-8") as f:
         json.dump({"label_to_id": label_to_id, "id_to_label": id_to_label}, f, ensure_ascii=False, indent=2)
 
-    # 2. Write CSVs
+    # 2. Write CSVs (only train & test now)
     out_paths = {}
     for split, rows in split_rows.items():
         out_csv = cache_path / f"hmdb51_{split}.csv"
         with out_csv.open("w", newline="", encoding="utf-8") as f:
             writer = csv.writer(f)
             for r in rows:
-                # Write ABSOLUTE paths so that downstream ``VideoCSVAnnotation``
-                # (which may receive ``data_root``) does not accidentally
-                # double‑prefix the root directory when resolving relative
-                # paths. Previously we wrote a relative path like
-                #   datasets/hmdb51/validation/xxx.mp4
-                # and then ``VideoCSVAnnotation`` prefixed ``data_root`` again
-                # producing: datasets/hmdb51/datasets/hmdb51/validation/xxx.mp4
-                # which caused missing file / empty frame extraction errors.
                 video_path = (root / split / r["file_name"]).resolve()
                 writer.writerow([str(video_path), label_to_id[r["label"]]])
         out_paths[split] = str(out_csv)
 
-    # Map 'validation' -> 'val' for downstream expectations
-    return {
-        "train": out_paths["train"],
-        "val": out_paths["validation"],
-        "test": out_paths["test"],
-        "label_mapping": str(mapping_file),
-    }
+    return {"train": out_paths["train"], "test": out_paths["test"], "label_mapping": str(mapping_file)}
 
 
 def prepare_diving48_annotations(
@@ -616,6 +616,7 @@ def create_datamodule_for(
     diving48_train_json: Optional[str] = None,
     diving48_test_json: Optional[str] = None,
     diving48_val_ratio: float = 0.1,
+    use_test_as_val: bool = False,
 ) -> VideoDataModule:
     """Factory helper to create a ``VideoDataModule`` for built-in datasets.
 
@@ -634,13 +635,14 @@ def create_datamodule_for(
         dm = VideoDataModule(
             data_root=root_dir,
             train_csv=annos["train"],
-            val_csv=annos["val"],
+            val_csv=None,
             test_csv=annos["test"],
             frames_per_clip=frames_per_clip,
             batch_size=batch_size,
             num_workers=num_workers,
             frame_cache_dir=frame_cache_dir,
             resize=resize,
+            use_test_as_val=use_test_as_val,
         )
         return dm
 
@@ -669,6 +671,7 @@ def create_datamodule_for(
             num_workers=num_workers,
             frame_cache_dir=frame_cache_dir,
             resize=resize,
+            use_test_as_val=use_test_as_val,
         )
         return dm
 

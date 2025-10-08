@@ -112,6 +112,11 @@ def parse_args() -> argparse.Namespace:
         help='Validation ratio split when auto-generating Diving48 annotations'
     )
     data_group.add_argument(
+        '--use-test-as-val',
+        action='store_true',
+        help='Use test split also as validation when no explicit validation set (e.g., hmdb51 without validation)'
+    )
+    data_group.add_argument(
         '--frame-cache',
         type=str,
         default=None,
@@ -275,6 +280,11 @@ def parse_args() -> argparse.Namespace:
         '--test-each-epoch',
         action='store_true',
         help='Evaluate test split after each training epoch'
+    )
+    log_group.add_argument(
+        '--no-future-warning',
+        action='store_true',
+        help='Suppress Python FutureWarning messages'
     )
     
     # ===== Hardware =====
