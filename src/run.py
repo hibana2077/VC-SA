@@ -94,6 +94,45 @@ def setup_callbacks(output_dir: str, project_name: str, monitor_metric: str = 'v
     return [ckpt_cb, lr_cb]
 
 
+class PeriodicPrinterCallback(L.Callback):
+    """Lightweight callback to print training status every N steps when tqdm is disabled.
+
+    Prints: epoch, global_step, loss (if logged), lr (if logged), and any accuracy metric
+    present in the logger's latest logged metrics dictionary.
+    """
+    def __init__(self, interval: int):
+        super().__init__()
+        self.interval = max(1, interval)
+
+    def on_train_batch_end(self, trainer: L.Trainer, pl_module, outputs, batch, batch_idx: int):
+        if self.interval <= 0:
+            return
+        global_step = trainer.global_step
+        if global_step == 0 or global_step % self.interval != 0:
+            return
+        metrics = trainer.callback_metrics  # includes latest logged metrics
+        epoch = trainer.current_epoch
+        pieces = [f"[Periodic] epoch={epoch}", f"step={global_step}"]
+        for key in [
+            'train/loss', 'loss', 'train_loss',
+            'train/acc', 'val/acc', 'test/acc',
+        ]:
+            if key in metrics:
+                val = metrics[key]
+                # Convert tensors to python scalars
+                try:
+                    val = float(val)
+                except Exception:
+                    pass
+                pieces.append(f"{key}={val:.4f}" if isinstance(val, (float, int)) else f"{key}={val}")
+        # Try to get LR from optimizer param groups (first group)
+        if trainer.optimizers:
+            lr = trainer.optimizers[0].param_groups[0].get('lr')
+            if lr is not None:
+                pieces.append(f"lr={lr:.2e}")
+        print(' | '.join(pieces), flush=True)
+
+
 def setup_trainer(args, monitor_metric: str) -> L.Trainer:
     """
     Setup PyTorch Lightning Trainer.
@@ -107,6 +146,9 @@ def setup_trainer(args, monitor_metric: str) -> L.Trainer:
     os.makedirs(args.output, exist_ok=True)
     logger = CSVLogger(save_dir=args.output, name=args.project)
     callbacks = setup_callbacks(args.output, args.project, monitor_metric=monitor_metric)
+    # Inject periodic printer when tqdm disabled and interval specified
+    if getattr(args, 'no_tqdm', False) and getattr(args, 'print_interval', 0) > 0:
+        callbacks.append(PeriodicPrinterCallback(args.print_interval))
     
     # Determine accelerator
     if args.devices > 0 and torch.cuda.is_available():

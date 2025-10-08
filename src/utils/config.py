@@ -296,6 +296,12 @@ def parse_args() -> argparse.Namespace:
         action='store_true',
         help='Disable tqdm progress bars'
     )
+    log_group.add_argument(
+        '--print-interval',
+        type=int,
+        default=0,
+        help='When > 0 and progress bar disabled, print training status every N steps'
+    )
     
     # ===== Hardware =====
     hw_group = p.add_argument_group('Hardware')
@@ -385,6 +391,7 @@ def get_default_config() -> dict:
         'output': 'outputs',
         'project': 'graphsampler',
         'test_each_epoch': False,
+    'print_interval': 0,
         
         # Hardware
         'devices': 1,
