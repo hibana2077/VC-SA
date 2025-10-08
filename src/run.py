@@ -144,6 +144,10 @@ def main():
     if getattr(args, 'no_future_warning', False):
         warnings.filterwarnings('ignore', category=FutureWarning)
     
+    # Suppress UserWarnings if requested
+    if getattr(args, 'no_user_warning', False):
+        warnings.filterwarnings('ignore', category=UserWarning)
+    
     # Set random seed for reproducibility
     L.seed_everything(args.seed, workers=True)
     

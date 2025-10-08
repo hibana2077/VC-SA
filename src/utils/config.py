@@ -287,6 +287,11 @@ def parse_args() -> argparse.Namespace:
         help='Suppress Python FutureWarning messages'
     )
     log_group.add_argument(
+        '--no-user-warning',
+        action='store_true',
+        help='Suppress Python UserWarning messages'
+    )
+    log_group.add_argument(
         '--no-tqdm',
         action='store_true',
         help='Disable tqdm progress bars'
