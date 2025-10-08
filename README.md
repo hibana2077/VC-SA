@@ -1,52 +1,52 @@
 # VC-SA - Video Action Recognition with Graph-based Sampling
 
-[![Python](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/)
+[![Python](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 [![PyTorch](https://img.shields.io/badge/pytorch-2.0+-orange.svg)](https://pytorch.org/)
 [![Lightning](https://img.shields.io/badge/lightning-2.0+-purple.svg)](https://lightning.ai/)
 [![Code style: modular](https://img.shields.io/badge/code%20style-modular-green.svg)](docs/ARCHITECTURE.md)
 
-高效的視頻動作識別框架，採用模塊化設計，結合 Vision Transformer、幀/Token 智能選擇和圖記憶網絡。
+An efficient video action recognition framework with modular design, combining Vision Transformer, intelligent frame/token selection, and graph memory network.
 
-## ✨ 特色
+## ✨ Features
 
-- 🎯 **智能採樣**: 自動選擇最具信息量的幀和 Token
-- 🔗 **圖記憶網絡**: 基於圖結構的時序建模
-- ⚡ **高效訓練**: 支持混合精度、梯度累積和分佈式訓練
-- 🧩 **模塊化設計**: 清晰的程式碼結構，易於擴展和維護
-- 📊 **完整流程**: 從資料載入到模型訓練的端到端解決方案
+- 🎯 **Smart Sampling**: Automatically selects the most informative frames and tokens
+- 🔗 **Graph Memory Network**: Graph-based temporal modeling
+- ⚡ **Efficient Training**: Supports mixed precision, gradient accumulation, and distributed training
+- 🧩 **Modular Design**: Clear code structure, easy to extend and maintain
+- 📊 **Complete Pipeline**: End-to-end solution from data loading to model training
 
-## 📁 專案結構
+## 📁 Project Structure
 
 ```
 VC-SA/
 ├── src/
-│   ├── run.py              # 主程式入口
-│   ├── core/               # 核心模塊
-│   │   ├── models.py       # 模型架構
-│   │   └── data.py         # 資料處理
-│   └── utils/              # 工具函數
-│       ├── config.py       # 配置管理
-│       └── video_utils.py  # 視頻工具
+│   ├── run.py              # Main program entry
+│   ├── core/               # Core modules
+│   │   ├── models.py       # Model architectures
+│   │   └── data.py         # Data processing
+│   └── utils/              # Utility functions
+│       ├── config.py       # Configuration management
+│       └── video_utils.py  # Video utilities
 ├── example/
 │   └── core.py             # FrameTokenCoSelector & GraphBasedMemBank
 ├── docs/
-│   ├── idea.md             # 設計理念
-│   ├── ARCHITECTURE.md     # 架構文檔
-│   └── MIGRATION.md        # 遷移指南
-└── requirements.txt        # 依賴列表
+│   ├── idea.md             # Design philosophy
+│   ├── ARCHITECTURE.md     # Architecture documentation
+│   └── MIGRATION.md        # Migration guide
+└── requirements.txt        # Dependency list
 ```
 
-## 🚀 快速開始
+## 🚀 Quick Start
 
-### 安裝依賴
+### Install Dependencies
 
 ```bash
 pip install -r requirements.txt
 ```
 
-### 準備資料
+### Prepare Data
 
-建立 CSV 標註檔案（train.csv, val.csv, test.csv）：
+Create CSV annotation files (train.csv, val.csv, test.csv):
 
 ```csv
 video_path,label
@@ -54,7 +54,7 @@ video_path,label
 /path/to/video2.avi,1
 ```
 
-### 訓練模型
+### Train the Model
 
 ```bash
 python -m src.run \
@@ -70,13 +70,13 @@ python -m src.run \
     --max-epochs 50
 ```
 
-### Python API 使用
+### Python API Usage
 
 ```python
 from src.core import GraphSamplerActionModel, VideoDataModule
 from src.utils import get_default_config
 
-# 建立資料模塊
+# Create data module
 datamodule = VideoDataModule(
     data_root='data/videos',
     train_csv='train.csv',
@@ -86,7 +86,7 @@ datamodule = VideoDataModule(
     batch_size=2,
 )
 
-# 建立模型
+# Create model
 model = GraphSamplerActionModel(
     num_classes=400,
     frames_per_clip=16,
@@ -94,54 +94,54 @@ model = GraphSamplerActionModel(
     token_topk=32,
 )
 
-# 訓練（使用 PyTorch Lightning）
+# Train (using PyTorch Lightning)
 import lightning as L
 trainer = L.Trainer(max_epochs=50)
 trainer.fit(model, datamodule=datamodule)
 ```
 
-## 📚 文檔
+## 📚 Documentation
 
-- [架構概覽](docs/ARCHITECTURE.md) - 詳細的系統架構說明
-- [遷移指南](docs/MIGRATION.md) - 從舊版本遷移的指南
-- [程式碼文檔](src/README.md) - 模塊化程式碼說明
-- [設計理念](docs/idea.md) - 專案設計思路
+- [Architecture Overview](docs/ARCHITECTURE.md) - Detailed system architecture description
+- [Migration Guide](docs/MIGRATION.md) - Guide for migrating from older versions
+- [Code Documentation](src/README.md) - Modular code explanation
+- [Design Philosophy](docs/idea.md) - Project design ideas
 
-## 🔧 主要模塊
+## 🔧 Main Modules
 
 ### Core Modules
 
-- **models.py**: 模型架構定義
-  - `ViTTokenBackbone`: Vision Transformer 骨幹網絡
-  - `GraphSamplerActionModel`: 完整的動作識別模型
+- **models.py**: Model architecture definitions
+  - `ViTTokenBackbone`: Vision Transformer backbone network
+  - `GraphSamplerActionModel`: Complete action recognition model
 
-- **data.py**: 資料處理模塊
-  - `VideoDataModule`: Lightning 資料模塊
-  - `SimpleVideoDataset`: 視頻資料集
-  - `FrameCache`: 幀快取系統
+- **data.py**: Data processing module
+  - `VideoDataModule`: Lightning data module
+  - `SimpleVideoDataset`: Video dataset
+  - `FrameCache`: Frame caching system
 
 ### Utils Modules
 
-- **config.py**: 配置管理
-  - `parse_args()`: 命令列參數解析
-  - `TrainingConfig`: 配置類別
-  - `get_default_config()`: 獲取預設配置
+- **config.py**: Configuration management
+  - `parse_args()`: Command-line argument parsing
+  - `TrainingConfig`: Configuration class
+  - `get_default_config()`: Get default configuration
 
-- **video_utils.py**: 視頻處理工具
-  - `hash_path()`: 路徑哈希函數
+- **video_utils.py**: Video processing utilities
+  - `hash_path()`: Path hashing function
 
-## 🎓 引用
+<!-- ## 🎓 Citation
 
-如果這個專案對您的研究有幫助，請考慮引用。
+If this project helps your research, please consider citing it.
 
-## 📄 授權
+## 📄 License
 
-[在此添加授權資訊]
+[Add license information here]
 
-## 🤝 貢獻
+## 🤝 Contributing
 
-歡迎提交 Issue 和 Pull Request！
+Welcome to submit Issues and Pull Requests!
 
-## 📧 聯絡
+## 📧 Contact
 
-[在此添加聯絡資訊]
+[Add contact information here] -->
