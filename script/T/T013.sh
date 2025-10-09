@@ -1,6 +1,6 @@
 #!/bin/bash
 #PBS -P rp06
-#PBS -q dgxa100
+#PBS -q gpuvolta
 #PBS -l ngpus=1
 #PBS -l ncpus=16
 #PBS -l mem=16GB
