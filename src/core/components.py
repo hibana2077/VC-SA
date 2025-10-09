@@ -278,66 +278,141 @@ class SimpleFrameTokenSelector(nn.Module):
         return z, frame_idx, token_idx, frame_mask, token_mask
 
 
-class StatMem(nn.Module):
-    def __init__(self, d_model: int, use_arp: bool = True, window: int = 8, alpha: float = 0.5):
+from math import gcd, pi
+
+
+class RamaFuse(nn.Module):
+    """
+    Ramanujan-based sequence fusion layer (drop-in for StatMem)
+    Input : z:[B,T,M,D], valid_mask:[B,T,M] (optional)
+    Output: h:[B,T,M,D], memory_dict (kept for API compatibility)
+    No attention / No SSM / No tensor decomposition / No graphs.
+    """
+    def __init__(self,
+                 d_model: int,
+                 max_period: int = 16,
+                 window: int = 16,
+                 proj_dim: int = 0,
+                 causal: bool = True,
+                 beta_init: float = 0.5,
+                 eps: float = 1e-6):
         super().__init__()
-        self.use_arp = use_arp
-        self.window = max(1, int(window))
-        self.alpha = float(alpha)
+        self.Q = int(max_period)
+        self.W = int(window)
+        self.causal = causal
+        self.eps = eps
+
+        # optional low-dim projection for analysis branch
+        self.proj_dim = int(proj_dim)
+        if self.proj_dim > 0:
+            self.analysis_proj = nn.Linear(d_model, self.proj_dim, bias=False)
+        else:
+            self.analysis_proj = None
+
+        # learnable mixer on Q periodic channels (lightweight, per-token shared across D)
+        self.gate = nn.Sequential(
+            nn.Conv1d(self.Q, self.Q, kernel_size=1, groups=self.Q, bias=True),
+            nn.GELU(),
+            nn.Conv1d(self.Q, self.Q, kernel_size=1, bias=True),
+            nn.Sigmoid()
+        )
+
+        # learnable residual scale
+        self.beta = nn.Parameter(torch.tensor(beta_init, dtype=torch.float32))
+
+        # precompute Ramanujan filters: [Q, 1, W]
+        self.register_buffer("rama_kernels", self._make_rama_kernels(self.Q, self.W), persistent=False)
+
+        # API-compatible memory dict (not used; kept for drop-in parity)
         self._mem_state: Dict[str, torch.Tensor] = {}
 
     @staticmethod
-    def _arp_window(z_seq: torch.Tensor, t: int, W: int, valid_seq: Optional[torch.Tensor] = None) -> torch.Tensor:
-        device = z_seq.device
-        start = max(0, t - W + 1)
-        L = t - start + 1
-        w = torch.arange(1, L + 1, device=device, dtype=z_seq.dtype)
-        w = 2 * w - (L + 1)
-        w = w / (w.abs().sum().clamp_min(1e-6))
-        window = z_seq[start:t + 1]
-        if valid_seq is not None:
-            v = valid_seq[start:t + 1].unsqueeze(-1).to(z_seq.dtype)
-            window = window * v
-            denom = (v * w.view(L, 1, 1)).abs().sum(dim=0).clamp_min(1e-6)
-            return (window * w.view(L, 1, 1)).sum(dim=0) / denom
+    def _ramanujan_sum_vec(q: int, W: int, device: torch.device, dtype: torch.dtype) -> torch.Tensor:
+        # c_q(n) = sum_{1<=a<=q, gcd(a,q)=1} exp(2π i a n / q); use real part (integer-valued)
+        n = torch.arange(W, device=device, dtype=dtype)  # 0..W-1
+        ks = [a for a in range(1, q + 1) if gcd(a, q) == 1]
+        if len(ks) == 0:
+            return torch.ones(W, device=device, dtype=dtype)
+        angles = torch.outer(torch.tensor(ks, device=device, dtype=dtype), n) * (2.0 * pi / q)
+        c = torch.cos(angles).sum(dim=0)  # real part; sin-sum cancels by symmetry
+        # zero-mean & l2-normalize (improves stability)
+        c = c - c.mean()
+        denom = torch.sqrt(torch.clamp(torch.sum(c * c), min=1e-6))
+        c = c / denom
+        return c
+
+    def _make_rama_kernels(self, Q: int, W: int) -> torch.Tensor:
+        # Stack Q periods into a conv bank: [Q, 1, W]
+        ker = []
+        for q in range(1, Q + 1):
+            ker.append(self._ramanujan_sum_vec(q, W, device=torch.device("cpu"), dtype=torch.float32))
+        K = torch.stack(ker, dim=0).unsqueeze(1)  # [Q,1,W]
+        return K
+
+    def _pad(self, x: torch.Tensor) -> torch.Tensor:
+        # Causal or symmetric padding for "same" length output
+        if self.causal and self.W > 1:
+            return F.pad(x, (self.W - 1, 0))
         else:
-            return (window * w.view(L, 1, 1)).sum(dim=0)
+            pad = (self.W - 1) // 2
+            return F.pad(x, (pad, self.W - 1 - pad))
 
     def forward(self,
-                z: torch.Tensor,
-                pos: Optional[torch.Tensor] = None,
-                valid_mask: Optional[torch.Tensor] = None,
-                memory_id: Optional[str] = None,
-                reset_memory: bool = False) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
+                z: torch.Tensor,                  # [B,T,M,D]
+                pos: torch.Tensor = None,
+                valid_mask: torch.Tensor = None,  # [B,T,M]
+                memory_id: str = None,
+                reset_memory: bool = False):
         B, T, M, D = z.shape
-        device = z.device
+        device, dtype = z.device, z.dtype
         if valid_mask is None:
-            valid_mask = torch.ones(B, T, M, device=device, dtype=z.dtype)
+            valid_mask = torch.ones(B, T, M, device=device, dtype=dtype)
+
+        # ---- Analysis branch (compute r_{q,t} per token) ----
+        if self.analysis_proj is None:
+            z_anl = z.mean(dim=-1)  # [B,T,M]
+        else:
+            # project per token then mean over channels
+            z_flat = z.view(B * T * M, D)
+            proj = self.analysis_proj(z_flat).view(B, T, M, self.proj_dim)
+            z_anl = proj.mean(dim=-1)  # [B,T,M]
+
+        z_anl = z_anl * valid_mask  # mask padded tokens
+        x = z_anl.permute(0, 2, 1).contiguous()          # [B,M,T]
+        x = x.view(B * M, 1, T)                          # [BM,1,T]
+        x = self._pad(x)
+
+        rama_k = self.rama_kernels.to(device=device, dtype=dtype)  # [Q,1,W]
+        r = F.conv1d(x, rama_k, bias=None, stride=1, padding=0)    # [BM,Q,T]
+        r = r.view(B, M, self.Q, T).permute(0, 2, 1, 3).contiguous()  # [B,Q,M,T]
+
+        # gating over Q (per token/time)
+        g = self.gate(r.view(B * M, self.Q, T))  # [BM,Q,T]
+        g = g.view(B, M, self.Q, T).permute(0, 2, 1, 3).contiguous()  # [B,Q,M,T]
+
+        # ---- Synthesis branch (apply same filters to full D channels) ----
+        z_syn = (z * valid_mask.unsqueeze(-1)).permute(0, 2, 3, 1).contiguous()  # [B,M,D,T]
+        y = z_syn.view(B * M * D, 1, T)
+        y = self._pad(y)
+        R = F.conv1d(y, rama_k, bias=None, stride=1, padding=0)  # [B*M*D, Q, T]
+        R = R.view(B, M, D, self.Q, T).permute(0, 3, 1, 2, 4).contiguous()  # [B,Q,M,D,T]
+
+        # weighted sum across periods
+        p = (R * g.unsqueeze(3)).sum(dim=1)  # [B,M,D,T]
+        p = p.permute(0, 3, 1, 2).contiguous()  # [B,T,M,D]
+
+        # residual output + keep padding positions unchanged
+        h = z + self.beta * p
+        h = valid_mask.unsqueeze(-1) * h + (1.0 - valid_mask.unsqueeze(-1)) * z
+
+        # API-compatible memory dict (no recurrent state by default)
         key = memory_id or "default"
         if reset_memory or (key not in self._mem_state):
-            self._mem_state[key] = torch.zeros(B, M, D, device=device, dtype=z.dtype)
-        mem = self._mem_state[key]
-        h_list = []
-        for t in range(T):
-            z_t = z[:, t]
-            v_t = valid_mask[:, t].unsqueeze(-1)
-            if self.use_arp:
-                arp_t = torch.zeros_like(z_t)
-                for b in range(B):
-                    arp_t[b] = self._arp_window(z[b], t, self.window, valid_seq=valid_mask[b])
-                base = arp_t
-            else:
-                base = z_t
-            h_t = (1.0 - self.alpha) * mem + self.alpha * base
-            h_t = v_t * h_t + (1.0 - v_t) * mem
-            h_list.append(h_t)
-            mem = h_t
-        h = torch.stack(h_list, dim=1)
-        self._mem_state[key] = mem
-        return h, {key: mem}
+            self._mem_state[key] = torch.zeros(B, M, D, device=device, dtype=dtype)
+        return h, {key: self._mem_state[key]}
 
 
 __all__ = [
     'SimpleFrameTokenSelector',
-    'StatMem'
+    'RamaFuse'
 ]

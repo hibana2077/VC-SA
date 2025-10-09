@@ -24,7 +24,7 @@ import sys
 
 from .components import (
     SimpleFrameTokenSelector,
-    StatMem,
+    RamaFuse,
 )
 
 
@@ -148,9 +148,15 @@ class GraphSamplerActionModel(L.LightningModule):
         # (StatLite) options
         lambda_cov: float = 1.0,
         lambda_score: float = 0.0,
-        mem_use_arp: bool = True,
-        mem_window: int = 8,
-        mem_alpha: float = 0.5,
+        mem_use_arp: bool = True,  # legacy (unused now)
+        mem_window: int = 8,       # legacy (unused now)
+        mem_alpha: float = 0.5,    # legacy (unused now)
+        # RamaFuse hyperparameters
+        rama_max_period: int = 16,
+        rama_window: int = 16,
+        rama_proj_dim: int = 0,
+        rama_causal: bool = True,
+        rama_beta: float = 0.5,
     ):
         super().__init__()
         self.save_hyperparameters()
@@ -180,11 +186,14 @@ class GraphSamplerActionModel(L.LightningModule):
             lambda_score=lambda_score,
             use_cls=False,
         )
-        self.mem_bank = StatMem(
+        # Replace legacy StatMem with RamaFuse (Ramanujan sums fusion)
+        self.mem_bank = RamaFuse(
             d_model=d_model,
-            use_arp=mem_use_arp,
-            window=mem_window,
-            alpha=mem_alpha,
+            max_period=rama_max_period,
+            window=rama_window,
+            proj_dim=rama_proj_dim,
+            causal=rama_causal,
+            beta_init=rama_beta,
         )
         
         # Classification head

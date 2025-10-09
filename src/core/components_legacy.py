@@ -367,3 +367,64 @@ __all__ = [
 	'LatentCrossAttnMemBank', 'TemporalConvMemBank'
 ]
 
+# ---- Legacy statistical memory (moved out of main path) ----
+class StatMem(nn.Module):
+	def __init__(self, d_model: int, use_arp: bool = True, window: int = 8, alpha: float = 0.5):
+		super().__init__()
+		self.use_arp = use_arp
+		self.window = max(1, int(window))
+		self.alpha = float(alpha)
+		self._mem_state: Dict[str, torch.Tensor] = {}
+
+	@staticmethod
+	def _arp_window(z_seq: torch.Tensor, t: int, W: int, valid_seq: Optional[torch.Tensor] = None) -> torch.Tensor:
+		device = z_seq.device
+		start = max(0, t - W + 1)
+		L = t - start + 1
+		w = torch.arange(1, L + 1, device=device, dtype=z_seq.dtype)
+		w = 2 * w - (L + 1)
+		w = w / (w.abs().sum().clamp_min(1e-6))
+		window = z_seq[start:t + 1]
+		if valid_seq is not None:
+			v = valid_seq[start:t + 1].unsqueeze(-1).to(z_seq.dtype)
+			window = window * v
+			denom = (v * w.view(L, 1, 1)).abs().sum(dim=0).clamp_min(1e-6)
+			return (window * w.view(L, 1, 1)).sum(dim=0) / denom
+		else:
+			return (window * w.view(L, 1, 1)).sum(dim=0)
+
+	def forward(self,
+				z: torch.Tensor,
+				pos: Optional[torch.Tensor] = None,
+				valid_mask: Optional[torch.Tensor] = None,
+				memory_id: Optional[str] = None,
+				reset_memory: bool = False):
+		B, T, M, D = z.shape
+		device = z.device
+		if valid_mask is None:
+			valid_mask = torch.ones(B, T, M, device=device, dtype=z.dtype)
+		key = memory_id or "default"
+		if reset_memory or (key not in self._mem_state):
+			self._mem_state[key] = torch.zeros(B, M, D, device=device, dtype=z.dtype)
+		mem = self._mem_state[key]
+		h_list = []
+		for t in range(T):
+			z_t = z[:, t]
+			v_t = valid_mask[:, t].unsqueeze(-1)
+			if self.use_arp:
+				arp_t = torch.zeros_like(z_t)
+				for b in range(B):
+					arp_t[b] = self._arp_window(z[b], t, self.window, valid_seq=valid_mask[b])
+				base = arp_t
+			else:
+				base = z_t
+			h_t = (1.0 - self.alpha) * mem + self.alpha * base
+			h_t = v_t * h_t + (1.0 - v_t) * mem
+			h_list.append(h_t)
+			mem = h_t
+		h = torch.stack(h_list, dim=1)
+		self._mem_state[key] = mem
+		return h, {key: mem}
+
+__all__.append('StatMem')
+

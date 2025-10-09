@@ -1,229 +1,190 @@
-好的，收到你的限制（不用 SSM／tensor 分解／GNN／graph／低秩核／ToMe/VTM）。下面給你兩個**可直接替換**的 Drop-in 模組：一個取代「可學式 frame/token selection」，一個（其實給你兩種可選）取代「Mem bank」，**完全遵守你現有 I/O**：`selector: x∈[B,T,N,D] → z∈[B,Kf,Kt,D]`、`membank: z∈[B,T,M,D] → h∈[B,T,M,D]`，與你檔案裡的介面/形狀一致。  
+下面給你一個遵守「現有 I/O」的 drop-in：**RamaFuse（Ramanujan 序列特徵融合層）**。它不使用 attention／SSM／張量分解／圖方法／低秩核／ToMe/VTM，而是用 **Ramanujan sums** 的「整數週期基底」在時間軸上做分析–合成式的週期投影與殘差融合，專抓「重複節律／週期性動作」訊號。Ramanujan sums (c_q(n)) 來自數論，定義為對所有與 (q) 互質的 (a) 的原始 (q) 次單位根冪次求和；它們天然對「週期 (q)」有選擇性，因此在訊號處理上被用來做 **Ramanujan Periodicity Transform / Filter Banks** 以偵測時變週期結構（例如生醫、語音、腦波）——我們把這套基底變成可微分、端到端的序列融合層即可。 ([維基百科][1])
 
 ---
 
-# A) 取代選取器：FPS + 變化點（不靠低秩核／圖）
+# RamaFuse：Ramanujan Sequence Feature Fusion（可直接替換 StatMem）
 
-**想法**：
+**I/O 完全對齊你現有的 `StatMem`**：輸入 `z:[B,T,M,D]`（T 為片段長度、每格 M 個 token、D 通道），可選 `valid_mask:[B,T,M]`；輸出 `h:[B,T,M,D]` 與 `memory_dict`。這與你檔案中 `StatMem` 的介面一致（forward 簽名與張量形狀註解）——你可以在原位置直接替換。  
 
-1. 先以**線上變化點**直覺找「關鍵時刻」（用簡單的 EMA 驅動的**新奇度**分數作為 seed）；
-2. 再用**Farthest-Point Sampling（FPS）/k-center 的 2-approx**去挑出 Kf 份量最「分散、代表性高」的影格；每個被選影格再在 token 內做一次 FPS 選 Kt。
-   — FPS/k-center 有經典 2-approx 理論保證，可避開任何低秩/核近似；變化點則可參考 Bayesian online changepoint 的精神（我們用無參、可微的簡化分數）。([cs.columbia.edu][1]) ([arXiv][2])
+**作法摘要（無注意力／無SSM）：**
 
-**Drop-in 實作（PyTorch）** — `FPSChangePointSelector`
+1. **Ramanujan 分析（analysis）**：為一組週期集合 (q=1..Q) 預先產生長度 (W) 的捲積核 (c_q[0..W-1])（Ramanujan sums，零均值、(L_2) 正規化）。對每個 token 的**壓縮表徵**（在 D 維上線性降維或取均值）做 1D 捲積得到「每個時間步的週期響應」 (r_{q,t})。
+2. **融合（synthesis）**：用 (r_{q,t}) 維度上的輕量 gating（Sigmoid/Swish + 1×1）產生權重，對**原始通道**做同一組 Ramanujan 核的可分離 1D 捲積並加權求和，得到周期性殘差 (p_t)。
+3. **殘差輸出**：(h_t = z_t + \beta \cdot p_t)（(\beta) 可學標量或 per-channel 參數）。`valid_mask` 會保持 padding 位置不變。
 
-> 介面與回傳欄位與你現有 `FrameTokenCoSelector` 對齊：`(z, frame_idx, token_idx, frame_mask, token_mask)`。
+> Ramanujan sums（(c_q(n)=\sum_{(a,q)=1} e^{2\pi i an/q})）具備「對應週期 (q) 的選擇性」、與多個 (q) 的（近）正交性；**Ramanujan filter banks (RFB)** 在訊號處理中用這些核掃過時間軸以追蹤局部、時變的週期，這正好符合影片中反覆動作的需求。([維基百科][1])
+> 相關還有 **Ramanujan subspace / RSP** 可把序列分解為「精確週期成分」並提供貪婪選擇策略，我們在這裡等價地用固定（可學縮放）基底+可微 gating 來近似。([arXiv][2])
+
+---
+
+## 直接可用的 PyTorch 模組（貼到你的 `components.py`，與 `__all__` 並存）
+
+> 完全不依賴外部套件（僅 `torch`），遵守 `StatMem` 介面；保持你原始檔案的形狀慣例與說明。
 
 ```python
-import torch, torch.nn as nn
-from typing import Optional, Tuple
+# ---------- RamaFuse: Ramanujan Sequence Feature Fusion (drop-in for StatMem) ----------
+from math import gcd, pi
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
 
-def _fps_indices_feats(X: torch.Tensor, k: int, seed_idx: int) -> torch.Tensor:
-    # X:[T,D]；greedy FPS，不用任何低秩/核技巧
-    T = X.size(0); k = min(k, T)
-    selected = [int(seed_idx)]
-    min_dist = torch.full((T,), float('inf'), device=X.device)
-    for _ in range(k - 1):
-        last = X[selected[-1]]           # [D]
-        dist = torch.norm(X - last[None, :], dim=1)  # [T]
-        min_dist = torch.minimum(min_dist, dist)
-        min_dist[torch.tensor(selected, device=X.device)] = -1
-        selected.append(int(torch.argmax(min_dist).item()))
-    return torch.tensor(selected, device=X.device, dtype=torch.long)
-
-def _fps_indices_tokens(F: torch.Tensor, k: int) -> torch.Tensor:
-    # F:[N,D]，先找離 frame-mean 最遠的一個，再做 FPS 擴張
-    N = F.size(0); k = min(k, N)
-    mu = F.mean(dim=0, keepdim=True)
-    first = int(torch.argmax(torch.norm(F - mu, dim=1)).item())
-    selected = [first]
-    min_dist = torch.full((N,), float('inf'), device=F.device)
-    for _ in range(k - 1):
-        last = F[selected[-1]]
-        dist = torch.norm(F - last[None, :], dim=1)
-        min_dist = torch.minimum(min_dist, dist)
-        min_dist[selected] = -1
-        selected.append(int(torch.argmax(min_dist).item()))
-    return torch.tensor(selected, device=F.device, dtype=torch.long)
-
-class FPSChangePointSelector(nn.Module):
+class RamaFuse(nn.Module):
     """
-    以「變化點 seed + FPS 覆蓋」取代原本的 MLP+ST Top-k 共選器
-    輸入 x:[B,T,N,D]；輸出與原 selector 完全一致
+    Ramanujan-based sequence fusion layer (drop-in for StatMem)
+    Input : z:[B,T,M,D], valid_mask:[B,T,M] (optional)
+    Output: h:[B,T,M,D], memory_dict (kept for API compatibility)
+    No attention / No SSM / No tensor decomposition / No graphs.
     """
-    def __init__(self, d_model:int, frame_topk:int, token_topk:int,
-                 use_cls:bool=False, ema_alpha:float=0.9):
+    def __init__(self,
+                 d_model: int,
+                 max_period: int = 16,
+                 window: int = 16,
+                 proj_dim: int = 0,          # 0 = use channel mean for analysis
+                 causal: bool = True,
+                 beta_init: float = 0.5,
+                 eps: float = 1e-6):
         super().__init__()
-        self.frame_topk, self.token_topk = frame_topk, token_topk
-        self.use_cls, self.ema_alpha = use_cls, ema_alpha
+        self.Q = int(max_period)
+        self.W = int(window)
+        self.causal = causal
+        self.eps = eps
 
-    def forward(self, x: torch.Tensor, mask: Optional[torch.Tensor]=None
-               ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        B,T,N,D = x.shape
-        device = x.device
-        if mask is None:
-            mask = torch.ones(B, T, N, device=device, dtype=x.dtype)
-
-        # frame 表徵 [B,T,D]（與你現有實作等價的 mean-pool 路徑）
-        if self.use_cls and N >= 1:
-            frame_repr = x[:, :, 0, :]
+        # optional low-dim projection for analysis branch
+        self.proj_dim = int(proj_dim)
+        if self.proj_dim > 0:
+            self.analysis_proj = nn.Linear(d_model, self.proj_dim, bias=False)
         else:
-            denom = mask.sum(dim=2, keepdim=True).clamp_min(1e-6)
-            frame_repr = (x * mask.unsqueeze(-1)).sum(dim=2) / denom  # [B,T,D]
+            self.analysis_proj = None
 
-        frame_idx = []
-        for b in range(B):
-            fr = frame_repr[b]  # [T,D]
-            # 新奇度 seed：與 EMA 差異最大的 t
-            ema = fr[0].clone()
-            novelty = torch.zeros(T, device=device)
-            for t in range(T):
-                novelty[t] = torch.norm(fr[t] - ema, p=2)
-                ema = self.ema_alpha * ema + (1 - self.ema_alpha) * fr[t]
-            seed = int(torch.argmax(novelty).item())
-            idx_b = _fps_indices_feats(fr, self.frame_topk, seed)  # [Kf]
-            frame_idx.append(idx_b)
-        frame_idx = torch.stack(frame_idx, dim=0)  # [B,Kf]
-
-        # token FPS（逐影格）
-        token_idx = torch.zeros(B, self.frame_topk, self.token_topk, dtype=torch.long, device=device)
-        for b in range(B):
-            for i in range(self.frame_topk):
-                f = int(frame_idx[b, i].item())
-                F = x[b, f]                                   # [N,D]
-                valid = mask[b, f] > 0                        # [N]
-                F = F[valid]
-                idx_tokens = _fps_indices_tokens(F, self.token_topk)
-                # 對應回原 N 的索引
-                token_idx[b, i, :len(idx_tokens)] = torch.nonzero(valid, as_tuple=False).squeeze(1)[idx_tokens]
-
-        # gather 成 z:[B,Kf,Kt,D]（與你檔案內流程對齊）
-        b_ar = torch.arange(B, device=device)[:, None]
-        x_sel_frames = x[b_ar, frame_idx]                        # [B,Kf,N,D]
-        b_ar2 = torch.arange(B, device=device)[:, None, None]
-        fr_ar2 = torch.arange(self.frame_topk, device=device)[None, :, None]
-        z = x_sel_frames[b_ar2, fr_ar2, token_idx]               # [B,Kf,Kt,D]
-
-        # 建 one-hot mask（與原 selector 回傳欄位一致）
-        frame_mask = torch.zeros(B, T, device=device, dtype=x.dtype)
-        frame_mask[b_ar, frame_idx] = 1.0
-        token_mask = torch.zeros(B, T, N, device=device, dtype=x.dtype)
-        token_mask[b_ar2, frame_idx[:, :, None], token_idx] = 1.0
-
-        return z, frame_idx, token_idx, frame_mask, token_mask
-```
-
-**為什麼可行**：FPS 對 k-center 的 greedy 2-approx 成立、且計算量是 (O(TK_f + NK_t))（每次只對「最新選點」算距離），實作簡單、完全不需要任何核/低秩近似或圖結構；變化點 seed 讓它更偏好關鍵時刻。([cs.columbia.edu][1]) ([arXiv][2])
-
----
-
-# B) 取代 Mem bank（兩個選項，皆非圖、非 SSM）
-
-## B1) **LatentCrossAttnMemBank**（Perceiver/Set Transformer 思想）
-
-以**少量可學 latent slots**對所有時序 token 做**交叉注意力**彙整，再把彙整資訊回寫到每個 token（tokens→latents→tokens）。複雜度 (O((TM)\cdot L)) 與序列長度線性，常數小、工程友好。靈感來自 **Perceiver / Perceiver IO** 與 **Set Transformer (PMA/ISAB)** 的誘導點設計。([arXiv][3])
-（VLM 中也常見「Perceiver Resampler」把大片視覺特徵壓進少量 latent，再回寫—概念相同。([arXiv][4])）
-
-```python
-class LatentCrossAttnMemBank(nn.Module):
-    """
-    z:[B,T,M,D] -> h:[B,T,M,D]；不使用圖/SSM/低秩核
-    """
-    def __init__(self, d_model:int, num_latents:int=64, num_heads:int=8, ff_mult:int=4, dropout:float=0.0):
-        super().__init__()
-        self.latents = nn.Parameter(torch.randn(num_latents, d_model))
-        self.enc_attn = nn.MultiheadAttention(d_model, num_heads, batch_first=True, dropout=dropout)
-        self.dec_attn = nn.MultiheadAttention(d_model, num_heads, batch_first=True, dropout=dropout)
-        self.ffn = nn.Sequential(
-            nn.LayerNorm(d_model),
-            nn.Linear(d_model, ff_mult*d_model), nn.GELU(), nn.Linear(ff_mult*d_model, d_model),
+        # learnable mixer on Q periodic channels (lightweight, per-token shared across D)
+        self.gate = nn.Sequential(
+            nn.Conv1d(self.Q, self.Q, kernel_size=1, groups=self.Q, bias=True),  # depthwise 1x1
+            nn.GELU(),
+            nn.Conv1d(self.Q, self.Q, kernel_size=1, bias=True),
+            nn.Sigmoid()
         )
-        self.norm_in = nn.LayerNorm(d_model)
-        self.norm_out = nn.LayerNorm(d_model)
 
-    def forward(self, z: torch.Tensor, valid_mask: Optional[torch.Tensor]=None):
-        B,T,M,D = z.shape
-        x = z.reshape(B, T*M, D)                                # [B,S,D], S=TM
-        x = self.norm_in(x)
-        q = self.latents.unsqueeze(0).expand(B, -1, -1)         # [B,L,D]
+        # learnable residual scale
+        self.beta = nn.Parameter(torch.tensor(beta_init, dtype=torch.float32))
 
-        # encode: latents attend to tokens
-        lat, _ = self.enc_attn(q, x, x, key_padding_mask=None)  # [B,L,D]
+        # precompute Ramanujan filters: [Q, 1, W]
+        self.register_buffer("rama_kernels", self._make_rama_kernels(self.Q, self.W), persistent=False)
 
-        # decode: tokens attend back to latents
-        y, _ = self.dec_attn(x, lat, lat)                       # [B,S,D]
-        y = self.ffn(y) + y
-        h = self.norm_out(x + y).reshape(B, T, M, D)
-        return h, {"latents": lat.detach()}
+        # API-compatible memory dict (not used; kept for drop-in parity)
+        self._mem_state = {}
+
+    @staticmethod
+    def _ramanujan_sum_vec(q: int, W: int, device: torch.device, dtype: torch.dtype) -> torch.Tensor:
+        # c_q(n) = sum_{1<=a<=q, gcd(a,q)=1} exp(2π i a n / q); use real part (integer-valued)
+        n = torch.arange(W, device=device, dtype=dtype)  # 0..W-1
+        ks = [a for a in range(1, q + 1) if gcd(a, q) == 1]
+        if len(ks) == 0:
+            return torch.ones(W, device=device, dtype=dtype)
+        angles = torch.outer(torch.tensor(ks, device=device, dtype=dtype), n) * (2.0 * pi / q)
+        c = torch.cos(angles).sum(dim=0)  # real part; sin-sum cancels by symmetry
+        # zero-mean & l2-normalize (improves stability)
+        c = c - c.mean()
+        denom = torch.sqrt(torch.clamp(torch.sum(c * c), min=1e-6))
+        c = c / denom
+        return c
+
+    def _make_rama_kernels(self, Q: int, W: int) -> torch.Tensor:
+        # Stack Q periods into a conv bank: [Q, 1, W]
+        ker = []
+        # q = 1..Q
+        for q in range(1, Q + 1):
+            ker.append(self._ramanujan_sum_vec(q, W, device=torch.device("cpu"), dtype=torch.float32))
+        K = torch.stack(ker, dim=0).unsqueeze(1)  # [Q,1,W]
+        return K
+
+    def _pad(self, x: torch.Tensor) -> torch.Tensor:
+        # Causal "same" length output
+        if self.causal and self.W > 1:
+            return F.pad(x, (self.W - 1, 0))
+        else:
+            # symmetric padding to keep length T
+            pad = (self.W - 1) // 2
+            return F.pad(x, (pad, self.W - 1 - pad))
+
+    def forward(self,
+                z: torch.Tensor,                  # [B,T,M,D]
+                pos: torch.Tensor = None,
+                valid_mask: torch.Tensor = None,  # [B,T,M]
+                memory_id: str = None,
+                reset_memory: bool = False):
+        B, T, M, D = z.shape
+        device, dtype = z.device, z.dtype
+        if valid_mask is None:
+            valid_mask = torch.ones(B, T, M, device=device, dtype=dtype)
+
+        # ---- Analysis branch (compute r_{q,t} per token) ----
+        if self.analysis_proj is None:
+            z_anl = z.mean(dim=-1)  # [B,T,M]
+        else:
+            z_anl = torch.einsum('btmd,df->btmf', z, self.analysis_proj.weight.t()).mean(dim=-1)  # [B,T,M]
+
+        z_anl = z_anl * valid_mask  # mask padded tokens
+        x = z_anl.permute(0, 2, 1).contiguous()          # [B,M,T]
+        x = x.view(B * M, 1, T)                          # [BM,1,T]
+        x = self._pad(x)                                  # pad for "same" conv
+
+        rama_k = self.rama_kernels.to(device=device, dtype=dtype)  # [Q,1,W]
+        r = F.conv1d(x, rama_k, bias=None, stride=1, padding=0)    # [BM,Q,T]
+        r = r.view(B, M, self.Q, T).permute(0, 2, 1, 3).contiguous()  # [B,Q,M,T]
+
+        # gating over Q (per token/time)
+        g = self.gate(r.view(B * M, self.Q, T))  # [BM,Q,T]
+        g = g.view(B, M, self.Q, T).permute(0, 2, 1, 3).contiguous()  # [B,Q,M,T]
+
+        # ---- Synthesis branch (apply same filters to full D channels) ----
+        z_syn = (z * valid_mask.unsqueeze(-1)).permute(0, 2, 3, 1).contiguous()  # [B,M,D,T]
+        y = z_syn.view(B * M * D, 1, T)
+        y = self._pad(y)
+        R = F.conv1d(y, rama_k, bias=None, stride=1, padding=0)  # [B*M*D, Q, T]
+        R = R.view(B, M, D, self.Q, T).permute(0, 3, 1, 2, 4).contiguous()  # [B,Q,M,D,T]
+
+        # weighted sum across periods
+        p = (R * g.unsqueeze(3)).sum(dim=1)  # [B,M,D,T]
+        p = p.permute(0, 3, 1, 2).contiguous()  # [B,T,M,D]
+
+        # residual output + keep padding positions unchanged
+        h = z + self.beta * p
+        h = valid_mask.unsqueeze(-1) * h + (1.0 - valid_mask.unsqueeze(-1)) * z
+
+        # API-compatible memory dict (no recurrent state by default)
+        key = memory_id or "default"
+        if reset_memory or (key not in self._mem_state):
+            self._mem_state[key] = torch.zeros(B, M, D, device=device, dtype=dtype)
+        return h, {key: self._mem_state[key]}
 ```
 
-## B2) **TemporalConvMemBank**（TCN 風格，僅 1D 卷積）
+**複雜度與特性**
 
-若你偏好**完全不使用注意力**，就用**深度可分離 1D conv + 膨脹率**（可雙向、非因果）在時間軸上聚合；這在序列任務上已被系統性比較過，常能以極小常數項拿到很好 trade-off。([arXiv][5])
-
-```python
-class TemporalConvMemBank(nn.Module):
-    """
-    z:[B,T,M,D] -> h:[B,T,M,D]；TCN 風格，不用圖/SSM/低秩核
-    """
-    def __init__(self, d_model:int, kernel_size:int=5, dilations=(1,2,4), dropout:float=0.0):
-        super().__init__()
-        layers = []
-        for d in dilations:
-            pad = d * (kernel_size - 1) // 2
-            layers += [
-                nn.Conv1d(d_model, d_model, kernel_size, padding=pad, dilation=d, groups=d_model),  # depthwise
-                nn.Conv1d(d_model, d_model, 1),  # pointwise
-                nn.GELU(),
-                nn.Dropout(dropout),
-            ]
-        self.layers = nn.ModuleList(layers)
-        self.norm = nn.LayerNorm(d_model)
-
-    def forward(self, z: torch.Tensor, valid_mask: Optional[torch.Tensor]=None):
-        B,T,M,D = z.shape
-        x = z.permute(0,2,3,1).reshape(B*M, D, T)  # [B*M,D,T]
-        y = x
-        for i in range(0, len(self.layers), 4):
-            dw = self.layers[i](y)
-            pw = self.layers[i+1](dw)
-            act = self.layers[i+2](pw)
-            y = self.layers[i+3](act) + y          # 殘差
-        h = y.reshape(B, M, D, T).permute(0, 3, 1, 2)  # [B,T,M,D]
-        h = self.norm(h)
-        return h, {}
-```
-
-> 若要**局部視窗注意力**版本（非低秩近似）：可以把 `z` 展成 `[B*M,T,D]`，對每條序列做**滑動視窗自注意力**（Longformer 的 sliding window 想法在 1D 時間軸上很自然）。這同樣不涉圖/SSM/低秩核。([arXiv][6])
+* 時間複雜度 ~ (O(Q \cdot W \cdot B \cdot M \cdot D \cdot T))（1D 可分離卷積），不引入注意力的二次方成本；`Q` 與 `W` 是你可控的超參，通常 (Q,W\le 16) 即可。**Ramanujan filter banks** 的文獻指出其能在短序列中檢出時變局部週期，這正好覆蓋 many human-action 的節律片段。([Eurasip][3])
+* 完全**無注意力／無SSM**；僅有固定基底 + 逐點非線性 gating。
+* 介面與你現有 `StatMem` 兼容；可直接在 `cls` 前替換。你的檔案已在說明中界定了形狀慣例與 forward 的輸入輸出。 
 
 ---
 
-## 串接方式（對齊你現有檔案）
+## 參數建議 & 整合步驟
 
-* 你的 pipeline 形狀慣例與 forward I/O 如下：`x:[B,T,N,D] → selector → z:[B,Kf,Kt,D]`；`z:[B,T,M,D] → mem_bank → h:[B,T,M,D]`。上面三個類別已**完全遵守**，與原 `gather`/回傳欄位語義一致，可直接替換檔案中的 `FrameTokenCoSelector` 與 `GraphBasedMemBank`。  
-
----
-
-## 小結 & 建議的最小替換順序
-
-1. **先換 Mem bank**：`GraphBasedMemBank → LatentCrossAttnMemBank`（或 `TemporalConvMemBank`），能立刻去掉建圖/kNN/GRU 記憶，常數項明顯下降。
-2. **再換選取器**：`FrameTokenCoSelector → FPSChangePointSelector`，不再依賴 MLP 打分與 ST 的訓練技巧，推論期尤其快。
-3. **驗證**：固定 ViT，量測 `(clips/s, GPU mem, Top-1)`；FPS 的挑選對 Kf/Kt 的可擴展性好，時間/空間都線性。
+1. **先小步測試**：`RamaFuse(d_model=D, max_period=8, window=8, proj_dim=0, causal=True)`；在 `SimpleFrameTokenSelector` 之後、`cls` 之前替換 `StatMem`。
+2. **與 ARP/EMA 對照**：你現有 `StatMem` 是 ARP + EMA（近似 rank pooling + 指數平滑）。先用同樣的訓練設定跑 A/B，比較 Top-1 與吞吐。
+3. **調 `Q` / `W`**：若動作更長週期（如 Diving48），把 `max_period`/`window` 增到 16–32。RFB/RPT 文獻顯示更大的 period grid 有助於解析較慢的週期結構。([Eurasip][3])
+4. **輕量 gating**：若過擬合，把 `self.gate` 簡化為單層 `Conv1d(Q,Q,1)` + `Sigmoid`。
+5. **數值穩定**：Ramanujan 核做了零均值與 (L_2) 正規化；你可視需求把 `beta_init` 調小（0.1）再 warm-up。
 
 ---
 
-### 參考（概念依據）
+## 為什麼「Ramanujan」在這裡有效？
 
-* **k-center 2-approx / Farthest-First（FPS）**：Gonzalez, 1985；簡單 greedy 即得 2-approx。([cs.columbia.edu][1])
-* **線上變化點**：Adams & MacKay, 2007（本文採其精神，實作為無參新奇度分數）。([arXiv][2])
-* **Set Transformer（PMA/ISAB）** 與 **Perceiver/Perceiver-IO（latent cross-attention）**：用小量誘導/latent 吸收大集合，再回寫到每個元素。([Proceedings of Machine Learning Research][7])
-* **Longformer**（滑動視窗注意力，可做 1D 時間版）：([arXiv][6])
-* **TCN**（時序 1D 卷積在序列任務上的系統性表現）：([arXiv][5])
+* (c_q(n)) 等價於「所有原始 (q) 次頻率的和」，因此對**週期 = q** 的結構有強響應；它還有接近正交的性質、可用來做**週期子空間分解**（RSP/FRSP），被證實能把序列拆成**精確週期成分**。我們把這些基底做卷積掃描 + gating，自然得到**時變週期性**的融合訊號，完全不需要注意力或狀態空間模型。([維基百科][1])
 
-[1]: https://www.cs.columbia.edu/~verma/classes/uml/ref/clustering_minimize_intercluster_distance_gonzalez.pdf "CLUSTERING TO MINIMIZE THE MAXIMUM ..."
-[2]: https://arxiv.org/abs/0710.3742 "Bayesian Online Changepoint Detection"
-[3]: https://arxiv.org/abs/2103.03206 "Perceiver: General Perception with Iterative Attention"
-[4]: https://arxiv.org/pdf/2204.14198 "🦩 Flamingo: a Visual Language Model for Few-Shot Learning"
-[5]: https://arxiv.org/abs/1803.01271 "An Empirical Evaluation of Generic Convolutional and Recurrent Networks for Sequence Modeling"
-[6]: https://arxiv.org/abs/2004.05150 "[2004.05150] Longformer: The Long-Document Transformer"
-[7]: https://proceedings.mlr.press/v97/lee19d/lee19d.pdf "A Framework for Attention-based Permutation-Invariant Neural ..."
+---
+
+如果你想，我可以幫你把 `components.py` 的 `__all__` 加上 `'RamaFuse'`，並替換你現有 `StatMem` 的建構處；或再做一版「非因果（centered）」與「流式因果」比較的 ablation 表。
+（背景脈絡與目前管線摘要見你上傳的設計筆記與元件說明。） 
+
+[1]: https://en.wikipedia.org/wiki/Ramanujan%27s_sum "Ramanujan's sum"
+[2]: https://arxiv.org/abs/1512.08112 "Ramanujan subspace pursuit for signal periodic decomposition"
+[3]: https://www.eurasip.org/Proceedings/Eusipco/Eusipco2015/papers/1570091833.pdf "Properties of Ramanujan filter banks"

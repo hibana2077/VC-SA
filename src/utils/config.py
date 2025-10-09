@@ -318,6 +318,15 @@ def parse_args() -> argparse.Namespace:
         help='Distributed training strategy (auto, ddp, ddp_spawn, etc.)'
     )
     
+    # ===== Temporal Fusion (RamaFuse) =====
+    rf_group = p.add_argument_group('Temporal Fusion (RamaFuse)')
+    rf_group.add_argument('--rama-max-period', type=int, default=16, help='Max Ramanujan period Q')
+    rf_group.add_argument('--rama-window', type=int, default=16, help='Analysis/synthesis window size W')
+    rf_group.add_argument('--rama-proj-dim', type=int, default=0, help='Analysis projection dim (0 = mean over channels)')
+    rf_group.add_argument('--rama-causal', action='store_true', default=True, help='Use causal padding (else centered)')
+    rf_group.add_argument('--no-rama-causal', dest='rama_causal', action='store_false', help='Disable causal padding (use centered)')
+    rf_group.add_argument('--rama-beta', type=float, default=0.5, help='Initial residual scale for RamaFuse')
+
     args = p.parse_args()
 
     # Canonicalize dataset aliases
@@ -396,4 +405,10 @@ def get_default_config() -> dict:
         # Hardware
         'devices': 1,
         'strategy': 'auto',
+        # RamaFuse defaults
+        'rama_max_period': 16,
+        'rama_window': 16,
+        'rama_proj_dim': 0,
+        'rama_causal': True,
+        'rama_beta': 0.5,
     }
