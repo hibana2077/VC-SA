@@ -1,6 +1,6 @@
 # M_score
 
-python3 -c "import timm; timm.create_model('aimv2_1b_patch14_224.apple_pt', pretrained=True)"
+python3 -c "import timm; timm.create_model('xcit_large_24_p8_224.fb_dist_in1k', pretrained=True)"
 
 ## Backbone Model
 
@@ -13,6 +13,7 @@ python3 -c "import timm; timm.create_model('aimv2_1b_patch14_224.apple_pt', pret
 - beit3_large_patch16_224.indomain_in22k_ft_in1k
 - xcit_small_24_p8_224.fb_dist_in1k
 - aimv2_1b_patch14_224.apple_pt
+- xcit_large_24_p8_224.fb_dist_in1k
 
 ## Summary of Test Accuracies
 
@@ -27,3 +28,4 @@ python3 -c "import timm; timm.create_model('aimv2_1b_patch14_224.apple_pt', pret
 | M007 | xcit_small_24_p8_224.fb_dist_in1k | ? |
 | M008 | aimv2_1b_patch14_224.apple_pt | ? |
 | M009 | beit3_large_patch16_224.indomain_in22k_ft_in1k | ? |
+| M010 | xcit_large_24_p8_224.fb_dist_in1k | ? |
