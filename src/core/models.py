@@ -144,12 +144,6 @@ class GraphSamplerActionModel(L.LightningModule):
         use_gat: bool = True,
         label_smoothing: float = 0.0,
         test_each_epoch: bool = True,
-        # (legacy args retained for backward-compat; unused)
-        lambda_cov: float = 1.0,
-        lambda_score: float = 0.0,
-        mem_use_arp: bool = True,
-        mem_window: int = 8,
-        mem_alpha: float = 0.5,
         # SQuaRe-Fuse hyperparameters
         square_num_dirs: int = 8,
         square_quantiles: Tuple[float, ...] = (0.1, 0.5, 0.9),
