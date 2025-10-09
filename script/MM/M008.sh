@@ -14,6 +14,6 @@ module load ffmpeg/4.1.3
 source /scratch/rp06/sl5952/VC-SA/.venv/bin/activate
 export HF_HOME="/scratch/rp06/sl5952/VC-SA/.cache"
 export HF_HUB_OFFLINE=1
-# aimv2_1b_patch14_224.apple_pt
+# vit_base_patch16_siglip_224.v2_webli
 cd ../..
-python3 -m src.run --dataset hmdb51 --data-root ./datasets/hmdb51 --freeze-backbone --vit-name aimv2_1b_patch14_224.apple_pt --frames-per-clip 12 --square-num-dirs 10 --batch-size 2 --num-workers 4 --precision 32 --no-future-warning --no-user-warning --use-test-as-val --no-tqdm --print-interval 1000 >> M008.log 2>&1
+python3 -m src.run --dataset hmdb51 --data-root ./datasets/hmdb51 --freeze-backbone --vit-name vit_base_patch16_siglip_224.v2_webli --frames-per-clip 12 --square-num-dirs 10 --batch-size 2 --num-workers 4 --precision 32 --no-future-warning --no-user-warning --use-test-as-val --no-tqdm --print-interval 1000 >> M008.log 2>&1
