@@ -340,18 +340,18 @@ def get_default_config() -> dict:
     return {
         # Data
         'data_root': '.',
-    'dataset': None,
-    'anno_cache': '.cache_annotations',
+        'dataset': None,
+        'anno_cache': '.cache_annotations',
         'frame_cache': None,
-    'train_anno': None,
-    'val_anno': None,
-    'test_anno': None,
-    'diving48_train_json': None,
-    'diving48_test_json': None,
-    'diving48_val_ratio': 0.1,
+        'train_anno': None,
+        'val_anno': None,
+        'test_anno': None,
+        'diving48_train_json': None,
+        'diving48_test_json': None,
+        'diving48_val_ratio': 0.1,
         
         # Model
-    'num_classes': None,
+        'num_classes': None,
         'frames_per_clip': 16,
         'frame_topk': 8,
         'token_topk': 32,
@@ -382,7 +382,7 @@ def get_default_config() -> dict:
         'output': 'outputs',
         'project': 'graphsampler',
         'test_each_epoch': False,
-    'print_interval': 0,
+        'print_interval': 0,
         
         # Hardware
         'devices': 1,
