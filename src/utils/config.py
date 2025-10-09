@@ -167,7 +167,7 @@ def parse_args() -> argparse.Namespace:
     )
     
     # ===== Selection and Graph Parameters =====
-    graph_group = p.add_argument_group('Frame/Token Selection & Graph')
+    graph_group = p.add_argument_group('Selection (legacy)')
     graph_group.add_argument(
         '--tau-frame',
         type=float,
@@ -180,29 +180,11 @@ def parse_args() -> argparse.Namespace:
         default=0.7,
         help='Temperature for token selection (higher = more uniform)'
     )
-    graph_group.add_argument(
-        '--graph-knn',
-        type=int,
-        default=8,
-        help='Number of nearest neighbors in spatial graph'
-    )
-    graph_group.add_argument(
-        '--graph-tw',
-        type=int,
-        default=2,
-        help='Temporal window (previous frames) for graph edges'
-    )
-    graph_group.add_argument(
-        '--graph-layers',
-        type=int,
-        default=1,
-        help='Number of graph convolution layers'
-    )
-    graph_group.add_argument(
-        '--no-gat',
-        action='store_true',
-        help='Use GCN instead of Graph Attention Network'
-    )
+    # Keep legacy graph args for backward-compatibility (no effect now)
+    graph_group.add_argument('--graph-knn', type=int, default=8, help='[legacy] graph K (unused)')
+    graph_group.add_argument('--graph-tw', type=int, default=2, help='[legacy] graph temporal window (unused)')
+    graph_group.add_argument('--graph-layers', type=int, default=1, help='[legacy] graph layers (unused)')
+    graph_group.add_argument('--no-gat', action='store_true', help='[legacy] disable GAT (unused)')
     
     # ===== Optimization =====
     opt_group = p.add_argument_group('Optimization')
@@ -318,14 +300,14 @@ def parse_args() -> argparse.Namespace:
         help='Distributed training strategy (auto, ddp, ddp_spawn, etc.)'
     )
     
-    # ===== Temporal Fusion (RamaFuse) =====
-    rf_group = p.add_argument_group('Temporal Fusion (RamaFuse)')
-    rf_group.add_argument('--rama-max-period', type=int, default=16, help='Max Ramanujan period Q')
-    rf_group.add_argument('--rama-window', type=int, default=16, help='Analysis/synthesis window size W')
-    rf_group.add_argument('--rama-proj-dim', type=int, default=0, help='Analysis projection dim (0 = mean over channels)')
-    rf_group.add_argument('--rama-causal', action='store_true', default=True, help='Use causal padding (else centered)')
-    rf_group.add_argument('--no-rama-causal', dest='rama_causal', action='store_false', help='Disable causal padding (use centered)')
-    rf_group.add_argument('--rama-beta', type=float, default=0.5, help='Initial residual scale for RamaFuse')
+    # ===== Temporal Fusion (SQuaRe-Fuse) =====
+    sq_group = p.add_argument_group('Temporal Fusion (SQuaRe-Fuse)')
+    sq_group.add_argument('--square-num-dirs', type=int, default=8, help='Number of projection directions K')
+    sq_group.add_argument('--square-quantiles', type=float, nargs='+', default=[0.1, 0.5, 0.9], help='Quantile levels (space separated)')
+    sq_group.add_argument('--square-poly-order', type=int, default=2, help='Legendre trend order (0..2)')
+    sq_group.add_argument('--square-beta', type=float, default=0.5, help='Initial residual scale beta')
+    sq_group.add_argument('--square-ortho', action='store_true', default=True, help='Orthonormalize projection each forward')
+    sq_group.add_argument('--no-square-ortho', dest='square_ortho', action='store_false', help='Disable orthonormalization')
 
     args = p.parse_args()
 
@@ -405,10 +387,10 @@ def get_default_config() -> dict:
         # Hardware
         'devices': 1,
         'strategy': 'auto',
-        # RamaFuse defaults
-        'rama_max_period': 16,
-        'rama_window': 16,
-        'rama_proj_dim': 0,
-        'rama_causal': True,
-        'rama_beta': 0.5,
+        # SQuaRe-Fuse defaults
+        'square_num_dirs': 8,
+        'square_quantiles': [0.1, 0.5, 0.9],
+        'square_poly_order': 2,
+        'square_beta': 0.5,
+        'square_ortho': True,
     }

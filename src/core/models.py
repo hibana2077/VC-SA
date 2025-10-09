@@ -23,8 +23,7 @@ from pathlib import Path
 import sys
 
 from .components import (
-    SimpleFrameTokenSelector,
-    RamaFuse,
+    SQuaReFuse,
 )
 
 
@@ -145,18 +144,18 @@ class GraphSamplerActionModel(L.LightningModule):
         use_gat: bool = True,
         label_smoothing: float = 0.0,
         test_each_epoch: bool = True,
-        # (StatLite) options
+        # (legacy args retained for backward-compat; unused)
         lambda_cov: float = 1.0,
         lambda_score: float = 0.0,
-        mem_use_arp: bool = True,  # legacy (unused now)
-        mem_window: int = 8,       # legacy (unused now)
-        mem_alpha: float = 0.5,    # legacy (unused now)
-        # RamaFuse hyperparameters
-        rama_max_period: int = 16,
-        rama_window: int = 16,
-        rama_proj_dim: int = 0,
-        rama_causal: bool = True,
-        rama_beta: float = 0.5,
+        mem_use_arp: bool = True,
+        mem_window: int = 8,
+        mem_alpha: float = 0.5,
+        # SQuaRe-Fuse hyperparameters
+        square_num_dirs: int = 8,
+        square_quantiles: Tuple[float, ...] = (0.1, 0.5, 0.9),
+        square_poly_order: int = 2,
+        square_beta: float = 0.5,
+        square_ortho: bool = True,
     ):
         super().__init__()
         self.save_hyperparameters()
@@ -170,30 +169,15 @@ class GraphSamplerActionModel(L.LightningModule):
         
         # Probe backbone to get dimensions
         d_model, n_tokens = self._probe_backbone_dims()
-        
-        # Validate hyperparameters
-        self._validate_hyperparameters(
-            token_topk, n_tokens,
-            frame_topk, frames_per_clip
-        )
-        
-        # Initialize StatLite selector & memory
-        self.co_selector = SimpleFrameTokenSelector(
+        # Selection removed; frame_topk/token_topk kept for CLI backward-compat but unused
+        # Replace RamaFuse with SQuaReFuse (Sliced-Quantile & Quadratic-trend Robust Fusion)
+        self.mem_bank = SQuaReFuse(
             d_model=d_model,
-            frame_topk=frame_topk,
-            token_topk=token_topk,
-            lambda_cov=lambda_cov,
-            lambda_score=lambda_score,
-            use_cls=False,
-        )
-        # Replace legacy StatMem with RamaFuse (Ramanujan sums fusion)
-        self.mem_bank = RamaFuse(
-            d_model=d_model,
-            max_period=rama_max_period,
-            window=rama_window,
-            proj_dim=rama_proj_dim,
-            causal=rama_causal,
-            beta_init=rama_beta,
+            num_dirs=square_num_dirs,
+            quantiles=tuple(square_quantiles),
+            poly_order=square_poly_order,
+            beta_init=square_beta,
+            ortho_every_forward=square_ortho,
         )
         
         # Classification head
@@ -223,22 +207,9 @@ class GraphSamplerActionModel(L.LightningModule):
             n_tokens = tokens.shape[1]
         return d_model, n_tokens
     
-    def _validate_hyperparameters(
-        self,
-        token_topk: int,
-        n_tokens: int,
-        frame_topk: int,
-        frames_per_clip: int
-    ):
-        """Validate model hyperparameters."""
-        if token_topk > n_tokens:
-            raise ValueError(
-                f"token_topk ({token_topk}) > number of ViT patch tokens ({n_tokens})"
-            )
-        if frame_topk > frames_per_clip:
-            raise ValueError(
-                f"frame_topk ({frame_topk}) > frames_per_clip ({frames_per_clip})"
-            )
+    def _validate_hyperparameters(self, *args, **kwargs):
+        """Deprecated: selection removed (kept for BC)."""
+        return None
     
     def configure_optimizers(self):
         """Configure optimizer and learning rate scheduler."""
@@ -293,11 +264,8 @@ class GraphSamplerActionModel(L.LightningModule):
         D = tokens.shape[2]
         tokens = tokens.view(B, T, N, D)
         
-        # Select important frames and tokens
-        z, frame_idx, token_idx, frame_mask, token_mask = self.co_selector(tokens)
-        
-        # Temporal statistical memory
-        h, _ = self.mem_bank(z, reset_memory=True)
+        # Temporal fusion directly on full token grid (no selection)
+        h, _ = self.mem_bank(tokens, reset_memory=True)
         
         # Global average pooling over time and tokens
         feat = h.mean(dim=(1, 2))  # [B, D]

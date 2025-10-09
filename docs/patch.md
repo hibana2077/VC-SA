@@ -1,190 +1,242 @@
-下面給你一個遵守「現有 I/O」的 drop-in：**RamaFuse（Ramanujan 序列特徵融合層）**。它不使用 attention／SSM／張量分解／圖方法／低秩核／ToMe/VTM，而是用 **Ramanujan sums** 的「整數週期基底」在時間軸上做分析–合成式的週期投影與殘差融合，專抓「重複節律／週期性動作」訊號。Ramanujan sums (c_q(n)) 來自數論，定義為對所有與 (q) 互質的 (a) 的原始 (q) 次單位根冪次求和；它們天然對「週期 (q)」有選擇性，因此在訊號處理上被用來做 **Ramanujan Periodicity Transform / Filter Banks** 以偵測時變週期結構（例如生醫、語音、腦波）——我們把這套基底變成可微分、端到端的序列融合層即可。 ([維基百科][1])
+下面給你一個**可直接替換**的 drop-in 模組：**SQuaRe-Fuse（Sliced-Quantile & Quadratic-trend Robust Fusion）**。它吃 ViT 的序列特徵 `x ∈ [B, T, N, D]`，輸出同形狀的 `h ∈ [B, T, N, D]`（兼容你現行的 shape 習慣與 head；若你的 cls 讀取是 broadcast/池化都能工作） 。為了少改動，你也可以把它**當作 RamaFuse 的替身**來用，forward 介面與回傳 `(h, memory_dict)` 也相容 。
 
 ---
 
-# RamaFuse：Ramanujan Sequence Feature Fusion（可直接替換 StatMem）
+# 為什麼這樣設計（2020–2025 統計與線代啟發）
 
-**I/O 完全對齊你現有的 `StatMem`**：輸入 `z:[B,T,M,D]`（T 為片段長度、每格 M 個 token、D 通道），可選 `valid_mask:[B,T,M]`；輸出 `h:[B,T,M,D]` 與 `memory_dict`。這與你檔案中 `StatMem` 的介面一致（forward 簽名與張量形狀註解）——你可以在原位置直接替換。  
+**核心想法**：把一段時間序列視為「每個 patch/token 的**分佈**」，用**投影＋分位數（quantile）統計**來做時序融合，再用**低次正交多項式趨勢**補足動態。這是純統計／線代路線，不用注意力、SSM、圖或低秩核。
 
-**作法摘要（無注意力／無SSM）：**
+1. **可微排序／分位數**
+   以 *Blondel et al., ICML 2020* 的**可微排序與排名**為基礎，我們可用排序後以高斯權重近似目標分位數，端到端訓練（O(n log n) 時間、O(n) 記憶）。這讓「quantile-pooling」能帶梯度，作為穩健（robust）彙整器。 ([Proceedings of Machine Learning Research][1])
 
-1. **Ramanujan 分析（analysis）**：為一組週期集合 (q=1..Q) 預先產生長度 (W) 的捲積核 (c_q[0..W-1])（Ramanujan sums，零均值、(L_2) 正規化）。對每個 token 的**壓縮表徵**（在 D 維上線性降維或取均值）做 1D 捲積得到「每個時間步的週期響應」 (r_{q,t})。
-2. **融合（synthesis）**：用 (r_{q,t}) 維度上的輕量 gating（Sigmoid/Swish + 1×1）產生權重，對**原始通道**做同一組 Ramanujan 核的可分離 1D 捲積並加權求和，得到周期性殘差 (p_t)。
-3. **殘差輸出**：(h_t = z_t + \beta \cdot p_t)（(\beta) 可學標量或 per-channel 參數）。`valid_mask` 會保持 padding 位置不變。
+2. **投影式最適傳輸（OT）直覺：高維分佈用投影來做**
+   高維直接做 Wasserstein 複雜、且易受維度詛咒；*Projection-Robust Wasserstein*（PRW）與其**投影-重心（barycenter）**想法提供了：先投影到低維（甚至 1D），在投影空間做幾何彙整，再回到原空間——我們用「**多方向切片（sliced）+ 分位數**」來近似這種幾何彙整。相關理論與演算法在 2020–2021 年已有成熟論述。 ([arXiv][2])
 
-> Ramanujan sums（(c_q(n)=\sum_{(a,q)=1} e^{2\pi i an/q})）具備「對應週期 (q) 的選擇性」、與多個 (q) 的（近）正交性；**Ramanujan filter banks (RFB)** 在訊號處理中用這些核掃過時間軸以追蹤局部、時變的週期，這正好符合影片中反覆動作的需求。([維基百科][1])
-> 相關還有 **Ramanujan subspace / RSP** 可把序列分解為「精確週期成分」並提供貪婪選擇策略，我們在這裡等價地用固定（可學縮放）基底+可微 gating 來近似。([arXiv][2])
+3. **正交多項式時序趨勢（Legendre basis）**
+   用少量正交多項式（例如 Legendre）抓一階、二階趨勢，是低成本又穩定的時間基底；近期亦有把 Legendre 表徵用於序列學習的工作作為依據。 ([compneuro.uwaterloo.ca][3])
+
+> 你的既有構想檔把前段做「共選 + 記憶庫（圖訊息傳遞）」；我們現在改為「投影-分位數-趨勢」的**統計彙整**，仍保留輸入/輸出介面與效率導向的精神。  
 
 ---
 
-## 直接可用的 PyTorch 模組（貼到你的 `components.py`，與 `__all__` 並存）
+# 模組設計：SQuaRe-Fuse（Sliced-Quantile & Quadratic-trend Robust Fusion）
 
-> 完全不依賴外部套件（僅 `torch`），遵守 `StatMem` 介面；保持你原始檔案的形狀慣例與說明。
+**輸入/輸出與相容性**
+
+* `forward(x:[B,T,N,D], valid_mask:[B,T,N]=None, ...) → (h:[B,T,N,D], memory_dict)`
+* 保持和你原本下游 cls/readout 的耦合最小（等形狀殘差輸出、可直接替換 RamaFuse） 。
+
+**三步融合**（完全不含 Attention/SSM/Graph/分解/低秩核）
+
+1. **多方向正交投影**：學習 `U ∈ R^{D×K}`，以 QR 每次正交化，對每個 token 的時間序列投影成 `K` 條一維序列。
+2. **可微分位數彙整**：對每條一維序列計算若干分位數（例如 10%、50%、90%），用可微排序 + 高斯權重近似；這等同在每個方向上做「**切片 Wasserstein 重心的分位數摘要**」。
+3. **趨勢項（Legendre 0/1/2 階）**：在時間軸對投影序列回歸得到係數，提供慢變動能，避免只取靜態分位數。
+   最後把 (方向×分位數×趨勢) 向量經一個線性層 map 回 `D` 維，形成每個 token 的**時間融合特徵** `y`，再做殘差 `h = x + β · broadcast(y)`（`broadcast` 到長度 `T`），得到與輸入同形狀的輸出。
+
+**計算複雜度**
+
+* 主要成本在排序：`O(B·N·K·T log T)`；K、分位數數量、趨勢階數都很小（典型 K=8~16、Q=3~7、P≤2），對常見 clip 長度（T≤16/32）很友善。
+* 不引入額外的全域二次項（如 attention 的 `O((TN)^2)`）與圖鄰接建構。
+
+---
+
+# 直接可用的 PyTorch 實作（Drop-in）
+
+> 檔名建議：`fusion_square.py`。介面比照你的 `RamaFuse`（回傳 `(h, mem)`），但輸入直接吃 ViT 輸出 `x:[B,T,N,D]`。你若希望完全替代「RamaFuse」名字，也可把類名改成 `RamaFuse` 後直接覆蓋。形狀與註解沿用你檔案慣例。 
 
 ```python
-# ---------- RamaFuse: Ramanujan Sequence Feature Fusion (drop-in for StatMem) ----------
-from math import gcd, pi
+# fusion_square.py
+# SQuaRe-Fuse: Sliced-Quantile & Quadratic-trend Robust Fusion
+# Drop-in 序列融合層：無 Attention/SSM/Graph/低秩核/ToMe
+from typing import Optional, Dict, Tuple
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-class RamaFuse(nn.Module):
+def _legendre_basis(T: int, order: int, device, dtype):
+    # 生成 0..order 的離散 Legendre 基底，t ∈ [-1,1]
+    t = torch.linspace(-1.0, 1.0, T, device=device, dtype=dtype)
+    P = [torch.ones_like(t)]
+    if order >= 1:
+        P.append(t)
+    for n in range(1, order):
+        # 遞推： (n+1)P_{n+1} = (2n+1)t P_n - n P_{n-1}
+        P.append(((2*n+1)*t*P[n] - n*P[n-1])/(n+1))
+    B = torch.stack(P[:order+1], dim=0)  # [ord+1, T]
+    # L2 normalize rows
+    B = B / (B.pow(2).sum(dim=1, keepdim=True).clamp_min(1e-6).sqrt())
+    return B  # [P+1, T]
+
+def _soft_quantiles(sorted_vals: torch.Tensor, levels: torch.Tensor, sigma: float=0.5):
     """
-    Ramanujan-based sequence fusion layer (drop-in for StatMem)
-    Input : z:[B,T,M,D], valid_mask:[B,T,M] (optional)
-    Output: h:[B,T,M,D], memory_dict (kept for API compatibility)
-    No attention / No SSM / No tensor decomposition / No graphs.
+    可微分位數：在已排序值 s[i] 上，以 N(mu, sigma) 對 rank 做權重平均。
+    sorted_vals: [..., T]
+    levels: [Q] in (0,1)
+    """
+    *lead, T = sorted_vals.shape
+    ranks = torch.arange(T, device=sorted_vals.device, dtype=sorted_vals.dtype)
+    targets = levels * (T - 1)  # 目標秩
+    # 權重 w[q, i] = exp(-(i - targets[q])^2 / (2 sigma^2)) / Z
+    diff = ranks[None, :] - targets[:, None]  # [Q, T]
+    w = torch.exp(-0.5 * (diff / max(sigma, 1e-6))**2)
+    w = w / w.sum(dim=1, keepdim=True).clamp_min(1e-6)  # [Q, T]
+    # 對最後一維做矩陣乘：[..., T] x [T] -> [...,]
+    # 先把 sorted 展成 [-1, T] 再乘 [Q, T]^T
+    s_flat = sorted_vals.reshape(-1, T)  # [L, T]
+    q = (w @ s_flat.T).T  # [L, Q]
+    return q.reshape(*lead, -1)  # [..., Q]
+
+class SQuaReFuse(nn.Module):
+    """
+    Sliced-Quantile & Quadratic-trend Robust Fusion
+    Input : x:[B,T,N,D], valid_mask:[B,T,N] (optional)
+    Output: h:[B,T,N,D], memory_dict (API 對齊 RamaFuse)
     """
     def __init__(self,
                  d_model: int,
-                 max_period: int = 16,
-                 window: int = 16,
-                 proj_dim: int = 0,          # 0 = use channel mean for analysis
-                 causal: bool = True,
+                 num_dirs: int = 8,           # K: 投影方向數
+                 quantiles: Tuple[float,...] = (0.1, 0.5, 0.9),
+                 poly_order: int = 2,         # 0..2 一般夠用
                  beta_init: float = 0.5,
-                 eps: float = 1e-6):
+                 ortho_every_forward: bool = True):
         super().__init__()
-        self.Q = int(max_period)
-        self.W = int(window)
-        self.causal = causal
-        self.eps = eps
+        self.d_model = d_model
+        self.K = int(num_dirs)
+        self.Q = torch.tensor(quantiles, dtype=torch.float32)
+        self.P = int(poly_order)
+        self.ortho_every_forward = ortho_every_forward
 
-        # optional low-dim projection for analysis branch
-        self.proj_dim = int(proj_dim)
-        if self.proj_dim > 0:
-            self.analysis_proj = nn.Linear(d_model, self.proj_dim, bias=False)
-        else:
-            self.analysis_proj = None
+        # 投影矩陣（學習），以 QR 正交化成 U
+        self.proj = nn.Linear(d_model, self.K, bias=False)
+        nn.init.kaiming_uniform_(self.proj.weight, a=5**0.5)
 
-        # learnable mixer on Q periodic channels (lightweight, per-token shared across D)
-        self.gate = nn.Sequential(
-            nn.Conv1d(self.Q, self.Q, kernel_size=1, groups=self.Q, bias=True),  # depthwise 1x1
+        # 把 (K * |Q|) 的分位數 + (K*(P+1)) 的趨勢係數 映回 D
+        feat_in = self.K * (len(quantiles) + (self.P + 1))
+        self.head = nn.Sequential(
+            nn.LayerNorm(feat_in),
+            nn.Linear(feat_in, 4 * d_model),
             nn.GELU(),
-            nn.Conv1d(self.Q, self.Q, kernel_size=1, bias=True),
-            nn.Sigmoid()
+            nn.Linear(4 * d_model, d_model),
         )
-
-        # learnable residual scale
+        # 殘差比例
         self.beta = nn.Parameter(torch.tensor(beta_init, dtype=torch.float32))
 
-        # precompute Ramanujan filters: [Q, 1, W]
-        self.register_buffer("rama_kernels", self._make_rama_kernels(self.Q, self.W), persistent=False)
+        self._mem_state: Dict[str, torch.Tensor] = {}
 
-        # API-compatible memory dict (not used; kept for drop-in parity)
-        self._mem_state = {}
-
-    @staticmethod
-    def _ramanujan_sum_vec(q: int, W: int, device: torch.device, dtype: torch.dtype) -> torch.Tensor:
-        # c_q(n) = sum_{1<=a<=q, gcd(a,q)=1} exp(2π i a n / q); use real part (integer-valued)
-        n = torch.arange(W, device=device, dtype=dtype)  # 0..W-1
-        ks = [a for a in range(1, q + 1) if gcd(a, q) == 1]
-        if len(ks) == 0:
-            return torch.ones(W, device=device, dtype=dtype)
-        angles = torch.outer(torch.tensor(ks, device=device, dtype=dtype), n) * (2.0 * pi / q)
-        c = torch.cos(angles).sum(dim=0)  # real part; sin-sum cancels by symmetry
-        # zero-mean & l2-normalize (improves stability)
-        c = c - c.mean()
-        denom = torch.sqrt(torch.clamp(torch.sum(c * c), min=1e-6))
-        c = c / denom
-        return c
-
-    def _make_rama_kernels(self, Q: int, W: int) -> torch.Tensor:
-        # Stack Q periods into a conv bank: [Q, 1, W]
-        ker = []
-        # q = 1..Q
-        for q in range(1, Q + 1):
-            ker.append(self._ramanujan_sum_vec(q, W, device=torch.device("cpu"), dtype=torch.float32))
-        K = torch.stack(ker, dim=0).unsqueeze(1)  # [Q,1,W]
-        return K
-
-    def _pad(self, x: torch.Tensor) -> torch.Tensor:
-        # Causal "same" length output
-        if self.causal and self.W > 1:
-            return F.pad(x, (self.W - 1, 0))
-        else:
-            # symmetric padding to keep length T
-            pad = (self.W - 1) // 2
-            return F.pad(x, (pad, self.W - 1 - pad))
+    def _orthonormalize(self):
+        with torch.no_grad():
+            W = self.proj.weight.data  # [K, D]
+            # 取轉置做 QR，得 Q^T -> 保證列（方向）正交
+            Q, _ = torch.linalg.qr(W.t(), mode='reduced')  # [D, K]
+            self.proj.weight.data.copy_(Q.t())
 
     def forward(self,
-                z: torch.Tensor,                  # [B,T,M,D]
-                pos: torch.Tensor = None,
-                valid_mask: torch.Tensor = None,  # [B,T,M]
+                x: torch.Tensor,                # [B,T,N,D]
+                valid_mask: Optional[torch.Tensor] = None,  # [B,T,N]
                 memory_id: str = None,
                 reset_memory: bool = False):
-        B, T, M, D = z.shape
-        device, dtype = z.device, z.dtype
+        B, T, N, D = x.shape
+        device, dtype = x.device, x.dtype
         if valid_mask is None:
-            valid_mask = torch.ones(B, T, M, device=device, dtype=dtype)
+            valid_mask = torch.ones(B, T, N, device=device, dtype=dtype)
 
-        # ---- Analysis branch (compute r_{q,t} per token) ----
-        if self.analysis_proj is None:
-            z_anl = z.mean(dim=-1)  # [B,T,M]
-        else:
-            z_anl = torch.einsum('btmd,df->btmf', z, self.analysis_proj.weight.t()).mean(dim=-1)  # [B,T,M]
+        if self.ortho_every_forward:
+            self._orthonormalize()
 
-        z_anl = z_anl * valid_mask  # mask padded tokens
-        x = z_anl.permute(0, 2, 1).contiguous()          # [B,M,T]
-        x = x.view(B * M, 1, T)                          # [BM,1,T]
-        x = self._pad(x)                                  # pad for "same" conv
+        # 1) 投影到 K 個方向：v = x · U  -> [B,T,N,K]
+        U = self.proj.weight.t()  # [D,K]
+        v = torch.einsum('btn d, dk -> btnk', x, U)  # [B,T,N,K]
+        v = v * valid_mask[..., None]  # mask 填零
 
-        rama_k = self.rama_kernels.to(device=device, dtype=dtype)  # [Q,1,W]
-        r = F.conv1d(x, rama_k, bias=None, stride=1, padding=0)    # [BM,Q,T]
-        r = r.view(B, M, self.Q, T).permute(0, 2, 1, 3).contiguous()  # [B,Q,M,T]
+        # 2) 可微分位數：沿時間軸
+        # sort: [B,N,K,T]
+        s, _ = torch.sort(v.permute(0,2,3,1).contiguous(), dim=-1)
+        levels = self.Q.to(device=device, dtype=dtype)  # [Q]
+        qv = _soft_quantiles(s, levels=levels, sigma=max(0.5, T/16))  # [B,N,K*Q]
+        qv = qv.view(B, N, self.K, -1)  # [B,N,K,Q]
 
-        # gating over Q (per token/time)
-        g = self.gate(r.view(B * M, self.Q, T))  # [BM,Q,T]
-        g = g.view(B, M, self.Q, T).permute(0, 2, 1, 3).contiguous()  # [B,Q,M,T]
+        # 3) Legendre 趨勢係數（0..P） on time
+        Bmat = _legendre_basis(T, self.P, device, dtype)  # [P+1, T]
+        # 係數 = 〈v_k(t), B_p(t)〉，先把 v 換成 [B,N,K,T]
+        v_bnkt = v.permute(0,2,3,1).contiguous()
+        coeff = torch.einsum('bnkt, pt -> bnkp', v_bnkt, Bmat)  # [B,N,K,P+1]
 
-        # ---- Synthesis branch (apply same filters to full D channels) ----
-        z_syn = (z * valid_mask.unsqueeze(-1)).permute(0, 2, 3, 1).contiguous()  # [B,M,D,T]
-        y = z_syn.view(B * M * D, 1, T)
-        y = self._pad(y)
-        R = F.conv1d(y, rama_k, bias=None, stride=1, padding=0)  # [B*M*D, Q, T]
-        R = R.view(B, M, D, self.Q, T).permute(0, 3, 1, 2, 4).contiguous()  # [B,Q,M,D,T]
+        # 拼接成 token-level 統計向量，再 map 回 D
+        feats = torch.cat([qv, coeff], dim=-1).reshape(B, N, -1)  # [B,N, K*(Q+P+1)]
+        y = self.head(feats)  # [B,N,D]
 
-        # weighted sum across periods
-        p = (R * g.unsqueeze(3)).sum(dim=1)  # [B,M,D,T]
-        p = p.permute(0, 3, 1, 2).contiguous()  # [B,T,M,D]
+        # broadcast 回時間，殘差融合
+        y_btnd = y[:, None, :, :].expand(B, T, N, D)
+        h = x + self.beta * y_btnd
+        h = valid_mask[..., None] * h + (1.0 - valid_mask[..., None]) * x
 
-        # residual output + keep padding positions unchanged
-        h = z + self.beta * p
-        h = valid_mask.unsqueeze(-1) * h + (1.0 - valid_mask.unsqueeze(-1)) * z
-
-        # API-compatible memory dict (no recurrent state by default)
         key = memory_id or "default"
         if reset_memory or (key not in self._mem_state):
-            self._mem_state[key] = torch.zeros(B, M, D, device=device, dtype=dtype)
+            self._mem_state[key] = torch.zeros(B, N, D, device=device, dtype=dtype)
         return h, {key: self._mem_state[key]}
 ```
 
-**複雜度與特性**
+**整合方法**
 
-* 時間複雜度 ~ (O(Q \cdot W \cdot B \cdot M \cdot D \cdot T))（1D 可分離卷積），不引入注意力的二次方成本；`Q` 與 `W` 是你可控的超參，通常 (Q,W\le 16) 即可。**Ramanujan filter banks** 的文獻指出其能在短序列中檢出時變局部週期，這正好覆蓋 many human-action 的節律片段。([Eurasip][3])
-* 完全**無注意力／無SSM**；僅有固定基底 + 逐點非線性 gating。
-* 介面與你現有 `StatMem` 兼容；可直接在 `cls` 前替換。你的檔案已在說明中界定了形狀慣例與 forward 的輸入輸出。 
-
----
-
-## 參數建議 & 整合步驟
-
-1. **先小步測試**：`RamaFuse(d_model=D, max_period=8, window=8, proj_dim=0, causal=True)`；在 `SimpleFrameTokenSelector` 之後、`cls` 之前替換 `StatMem`。
-2. **與 ARP/EMA 對照**：你現有 `StatMem` 是 ARP + EMA（近似 rank pooling + 指數平滑）。先用同樣的訓練設定跑 A/B，比較 Top-1 與吞吐。
-3. **調 `Q` / `W`**：若動作更長週期（如 Diving48），把 `max_period`/`window` 增到 16–32。RFB/RPT 文獻顯示更大的 period grid 有助於解析較慢的週期結構。([Eurasip][3])
-4. **輕量 gating**：若過擬合，把 `self.gate` 簡化為單層 `Conv1d(Q,Q,1)` + `Sigmoid`。
-5. **數值穩定**：Ramanujan 核做了零均值與 (L_2) 正規化；你可視需求把 `beta_init` 調小（0.1）再 warm-up。
+```python
+# x: ViT backbone 輸出，形狀 [B,T,N,D]（與你現有慣例一致）  :contentReference[oaicite:9]{index=9}
+fusion = SQuaReFuse(d_model=D, num_dirs=8, quantiles=(0.1,0.5,0.9), poly_order=2, beta_init=0.5)
+h, _ = fusion(x, valid_mask=mask)   # h:[B,T,N,D] 介面對齊 RamaFuse 的輸出位階  :contentReference[oaicite:10]{index=10}
+logits = cls_head(h)                 # 你的 cls 可用 CLS 讀取或全域池化皆可
+```
 
 ---
 
-## 為什麼「Ramanujan」在這裡有效？
+## 訓練與超參考建議
 
-* (c_q(n)) 等價於「所有原始 (q) 次頻率的和」，因此對**週期 = q** 的結構有強響應；它還有接近正交的性質、可用來做**週期子空間分解**（RSP/FRSP），被證實能把序列拆成**精確週期成分**。我們把這些基底做卷積掃描 + gating，自然得到**時變週期性**的融合訊號，完全不需要注意力或狀態空間模型。([維基百科][1])
+* **K（num_dirs）**：8 或 12 起手；T=8~16 時很穩。
+* **Quantiles**：`(0.1, 0.5, 0.9)` 或 `(0.2, 0.5, 0.8, 0.95)`；分位數越多越表現細，但計算略增。
+* **poly_order**：1 或 2；資料有明顯速度/加速度趨勢時才用 2。
+* **排序溫度 (`sigma`)**：我以 `max(0.5, T/16)` 做自適應，初期可再放大一點以求平滑梯度（對應可微排序的溫度概念）。理論與實作上可微排序提供穩健梯度路徑。 ([Proceedings of Machine Learning Research][1])
+* **β（殘差強度）**：從 0.25~0.5 開始訓練較穩。
+* **正交化**：`ortho_every_forward=True` 讓方向保持互異，對投影-分位數摘要有效（與 PRW/投影追求的精神一致）。 ([arXiv][2])
 
 ---
 
-如果你想，我可以幫你把 `components.py` 的 `__all__` 加上 `'RamaFuse'`，並替換你現有 `StatMem` 的建構處；或再做一版「非因果（centered）」與「流式因果」比較的 ablation 表。
-（背景脈絡與目前管線摘要見你上傳的設計筆記與元件說明。） 
+## 與你舊管線的對照與優點
 
-[1]: https://en.wikipedia.org/wiki/Ramanujan%27s_sum "Ramanujan's sum"
-[2]: https://arxiv.org/abs/1512.08112 "Ramanujan subspace pursuit for signal periodic decomposition"
-[3]: https://www.eurasip.org/Proceedings/Eusipco/Eusipco2015/papers/1570091833.pdf "Properties of Ramanujan filter banks"
+* 你原本 pipeline：**ViT → selection（frame/token）→ RamaFuse（序列融合）→ cls**；I/O 與形狀說明見你程式與構想檔。  
+* 新版：**ViT → SQuaRe-Fuse → cls**：**移除 selection 與圖記憶層**，但仍保有「**跨時間的穩健彙整能力**」與「**趨勢捕捉**」，同時**完全避開** Attention／SSM／tensor 分解／GNN／低秩核／ToMe/VTM。
+* 複雜度從圖建構與消息傳遞（或全域注意力）轉為 `K` 次排序與少量線性映射，**更適合長序列**或高解析度 token 數。
+
+---
+
+## 為何可期待改善當前「不太樂觀」的結果？
+
+1. **穩健性**：分位數比平均/總和更抗 outlier 與稀疏關鍵片段，對 RGB action 裡「短暫關鍵動作」更敏感。可微排序讓這種穩健統計**可學**。 ([Proceedings of Machine Learning Research][1])
+2. **高維→低維→回投影**：K 個正交方向的「切片 Wasserstein-風格摘要」能在不做注意力/圖的情況下，近似「沿重要方向對齊與聚合」的幾何效果。 ([arXiv][2])
+3. **趨勢顯式化**：Legendre 基底提供平滑的速度/加速度分量，補足純 quantile 的靜態性。 ([compneuro.uwaterloo.ca][3])
+
+---
+
+如果你願意，我也可以把上面類別直接改名為 `RamaFuse` 並覆蓋到你專案的 `components.py`，保持**零改動**的 import & call 端；或我幫你補一個最小的 `cls_head` 範例（支援 CLS 或 mean-pool）。
+（你先試 `K=8, Q=3, P=1` 的輕量版；若 Something-Something V2 的長時序關係還是吃緊，再把 `K` 與分位數加一點。）
+
+---
+
+### 附：你現有設計與 I/O 的引用
+
+* 你的 ViT 輸出 shape 與模組 I/O 習慣（`x:[B,T,N,D]`、選擇器/記憶庫 I/O）：
+* RamaFuse 的 drop-in 介面（輸入/輸出與記憶 dict）：
+* 研究構想檔中的前端「共選」與中段「圖式記憶」設計脈絡（本方案即把它們合併為統計融合）： 
+
+---
+
+**主要參考（理論依據，2020–2025）**
+
+* Blondel et al., *Fast Differentiable Sorting and Ranking*, ICML 2020 / JMLR 2020：可微排序/排名運算子與實作。 ([Proceedings of Machine Learning Research][1])
+* Lin et al., *Projection Robust Wasserstein Distance and Riemannian Optimization*, NeurIPS 2020：PRW 距離的投影追求與黎曼優化。 ([arXiv][2])
+* Huang et al., *Projection-Robust Wasserstein Barycenters*, ICML 2021：PRW barycenter 的高維投影式重心計算。 ([Proceedings of Machine Learning Research][4])
+* Furlong & Eliasmith, 2022：Legendre 多項式序列表徵與學習（作為時間基底的近例）。 ([compneuro.uwaterloo.ca][3])
+
+要我幫你把這層直接塞進你現有 repo（改名覆蓋 RamaFuse 或新增檔案），順便給一份對 Something-Something V2/K400 的最小訓練 config 嗎？
+
+[1]: https://proceedings.mlr.press/v119/blondel20a/blondel20a.pdf "Fast Differentiable Sorting and Ranking"
+[2]: https://arxiv.org/abs/2006.07458 "Projection Robust Wasserstein Distance and Riemannian Optimization"
+[3]: https://compneuro.uwaterloo.ca/files/publications/furlong.2022a.pdf "Learned Legendre Predictor: Learning with Compressed ..."
+[4]: https://proceedings.mlr.press/v139/huang21f/huang21f.pdf "Projection Robust Wasserstein Barycenters"

@@ -330,11 +330,11 @@ def main():
         mem_use_arp=True,
         mem_window=8,
         mem_alpha=0.5,
-        rama_max_period=args.rama_max_period,
-        rama_window=args.rama_window,
-        rama_proj_dim=args.rama_proj_dim,
-        rama_causal=args.rama_causal,
-        rama_beta=args.rama_beta,
+        square_num_dirs=args.square_num_dirs,
+        square_quantiles=tuple(args.square_quantiles),
+        square_poly_order=args.square_poly_order,
+        square_beta=args.square_beta,
+        square_ortho=args.square_ortho,
     )
     
     # Setup trainer

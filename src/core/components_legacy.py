@@ -4,7 +4,7 @@
 This file preserves the original learnable frame/token co-selector and the
 graph-based memory bank plus experimental alternative modules (FPS selector,
 latent cross-attention memory, temporal conv memory) prior to migration to the
-StatLite versions (SimpleFrameTokenSelector / StatMem).
+StatLite versions and SQuaRe-Fuse.
 
 They are no longer used in the main pipeline but retained for experimentation.
 Import manually if needed, e.g.:
@@ -427,4 +427,252 @@ class StatMem(nn.Module):
 		return h, {key: mem}
 
 __all__.append('StatMem')
+
+# ---- Lightweight statistical selector (legacy) ----
+def _safe_cosine(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+	a = F.normalize(a, dim=-1)
+	b = F.normalize(b, dim=-1)
+	return a @ b.transpose(-1, -2)
+
+
+def _facility_location_greedy(frame_repr: torch.Tensor, k: int, score: Optional[torch.Tensor] = None,
+							  lambda_cov: float = 1.0, lambda_score: float = 0.0,
+							  valid: Optional[torch.Tensor] = None) -> Tuple[torch.Tensor, torch.Tensor]:
+	B, T, D = frame_repr.shape
+	device = frame_repr.device
+	sim_bt = []
+	for b in range(B):
+		fb = frame_repr[b]
+		sim_bt.append(_safe_cosine(fb, fb))
+	sim = torch.stack(sim_bt, dim=0)  # [B,T,T]
+
+	if score is None:
+		score = torch.zeros(B, T, device=device)
+	if valid is None:
+		valid = torch.ones(B, T, device=device)
+
+	frame_idx = torch.zeros(B, k, dtype=torch.long, device=device)
+	frame_mask = torch.zeros(B, T, dtype=frame_repr.dtype, device=device)
+	best_cover = torch.zeros(B, T, device=device)
+	chosen = torch.zeros(B, T, dtype=torch.bool, device=device)
+
+	for step in range(k):
+		best = best_cover.unsqueeze(-1)  # [B,T,1]
+		new_best = torch.maximum(best, sim)
+		cov_gain_all = (new_best - best).sum(dim=1)  # [B,T]
+		total_gain = lambda_cov * cov_gain_all + lambda_score * score
+		total_gain = total_gain.masked_fill(~valid.bool(), float('-inf'))
+		total_gain = total_gain.masked_fill(chosen, float('-inf'))
+		j = torch.argmax(total_gain, dim=1)
+		frame_idx[:, step] = j
+		batch_arange = torch.arange(B, device=device)
+		frame_mask[batch_arange, j] = 1.0
+		bj = sim[batch_arange, :, j]
+		best_cover = torch.maximum(best_cover, bj)
+		chosen[batch_arange, j] = True
+
+	return frame_idx, frame_mask
+
+
+def _kcenter_greedy(X: torch.Tensor, k: int, valid: Optional[torch.Tensor] = None) -> torch.Tensor:
+	N, D = X.shape
+	device = X.device
+	if valid is None:
+		valid = torch.ones(N, device=device, dtype=torch.bool)
+	else:
+		valid = valid.bool()
+	valid_idx = torch.nonzero(valid, as_tuple=False).squeeze(-1)
+	if valid_idx.numel() == 0:
+		return X.new_zeros(k, dtype=torch.long)
+	Xv = X[valid_idx]
+	dists = (Xv ** 2).sum(dim=1)
+	first = torch.argmax(dists)
+	selected = [int(valid_idx[first].item())]
+	min_dist = torch.cdist(X, X[selected].detach(), p=2).squeeze(-1)
+	min_dist[~valid] = -1.0
+	for _ in range(1, k):
+		cand = torch.argmax(min_dist)
+		selected.append(int(cand.item()))
+		new_d = torch.cdist(X, X[cand].unsqueeze(0).detach(), p=2).squeeze(-1)
+		min_dist = torch.minimum(min_dist, new_d)
+		min_dist[~valid] = -1.0
+	return torch.tensor(selected, dtype=torch.long, device=device)
+
+
+class SimpleFrameTokenSelector(nn.Module):
+	def __init__(self,
+				 d_model: int,
+				 frame_topk: int,
+				 token_topk: int,
+				 lambda_cov: float = 1.0,
+				 lambda_score: float = 0.0,
+				 use_cls: bool = False,
+				 hidden: int = 4):
+		super().__init__()
+		self.frame_topk = frame_topk
+		self.token_topk = token_topk
+		self.lambda_cov = lambda_cov
+		self.lambda_score = lambda_score
+		self.use_cls = use_cls
+		self.frame_score_head = nn.Sequential(
+			nn.LayerNorm(d_model),
+			nn.Linear(d_model, hidden * d_model),
+			nn.GELU(),
+			nn.Linear(hidden * d_model, 1),
+		)
+
+	def forward(self,
+				x: torch.Tensor,
+				mask: Optional[torch.Tensor] = None) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+		B, T, N, D = x.shape
+		device = x.device
+		if mask is None:
+			mask = torch.ones(B, T, N, device=device, dtype=x.dtype)
+		if self.use_cls and N >= 1:
+			frame_repr = x[:, :, 0, :]
+			valid_frame = torch.ones(B, T, device=device, dtype=torch.bool)
+		else:
+			denom = mask.sum(dim=2, keepdim=False).clamp_min(1e-6)[..., None]
+			frame_repr = (x * mask[..., None]).sum(dim=2) / denom
+			valid_frame = (denom.squeeze(-1) > 0)
+		frame_score = self.frame_score_head(frame_repr).squeeze(-1)
+		frame_idx, frame_mask = _facility_location_greedy(
+			frame_repr, k=self.frame_topk, score=frame_score,
+			lambda_cov=self.lambda_cov, lambda_score=self.lambda_score,
+			valid=valid_frame.to(frame_repr.dtype)
+		)
+		token_idx = torch.zeros(B, self.frame_topk, self.token_topk, dtype=torch.long, device=device)
+		token_mask = torch.zeros(B, T, N, dtype=x.dtype, device=device)
+		batch_arange = torch.arange(B, device=device)
+		for b in range(B):
+			for kf in range(self.frame_topk):
+				t_sel = int(frame_idx[b, kf].item())
+				X = x[b, t_sel]
+				m = mask[b, t_sel] > 0.5
+				idxs = _kcenter_greedy(X, self.token_topk, valid=m)
+				token_idx[b, kf] = idxs
+				token_mask[b, t_sel, idxs] = 1.0
+		x_sel_frames = x[batch_arange[:, None], frame_idx]
+		z = x_sel_frames[batch_arange[:, None, None], torch.arange(self.frame_topk, device=device)[None, :, None], token_idx]
+		return z, frame_idx, token_idx, frame_mask, token_mask
+
+
+# ---- RamaFuse temporal fusion (legacy) ----
+from math import gcd, pi
+
+
+class RamaFuse(nn.Module):
+	"""
+	Ramanujan-based sequence fusion layer (legacy, replaced by SQuaRe-Fuse)
+	Input : z:[B,T,M,D], valid_mask:[B,T,M] (optional)
+	Output: h:[B,T,M,D], memory_dict (kept for API compatibility)
+	"""
+
+	def __init__(self,
+				 d_model: int,
+				 max_period: int = 16,
+				 window: int = 16,
+				 proj_dim: int = 0,
+				 causal: bool = True,
+				 beta_init: float = 0.5,
+				 eps: float = 1e-6):
+		super().__init__()
+		self.Q = int(max_period)
+		self.W = int(window)
+		self.causal = causal
+		self.eps = eps
+
+		self.proj_dim = int(proj_dim)
+		if self.proj_dim > 0:
+			self.analysis_proj = nn.Linear(d_model, self.proj_dim, bias=False)
+		else:
+			self.analysis_proj = None
+
+		self.gate = nn.Sequential(
+			nn.Conv1d(self.Q, self.Q, kernel_size=1, groups=self.Q, bias=True),
+			nn.GELU(),
+			nn.Conv1d(self.Q, self.Q, kernel_size=1, bias=True),
+			nn.Sigmoid()
+		)
+
+		self.beta = nn.Parameter(torch.tensor(beta_init, dtype=torch.float32))
+		self.register_buffer("rama_kernels", self._make_rama_kernels(self.Q, self.W), persistent=False)
+		self._mem_state: Dict[str, torch.Tensor] = {}
+
+	@staticmethod
+	def _ramanujan_sum_vec(q: int, W: int, device: torch.device, dtype: torch.dtype) -> torch.Tensor:
+		n = torch.arange(W, device=device, dtype=dtype)
+		ks = [a for a in range(1, q + 1) if gcd(a, q) == 1]
+		if len(ks) == 0:
+			return torch.ones(W, device=device, dtype=dtype)
+		angles = torch.outer(torch.tensor(ks, device=device, dtype=dtype), n) * (2.0 * pi / q)
+		c = torch.cos(angles).sum(dim=0)
+		c = c - c.mean()
+		denom = torch.sqrt(torch.clamp(torch.sum(c * c), min=1e-6))
+		c = c / denom
+		return c
+
+	def _make_rama_kernels(self, Q: int, W: int) -> torch.Tensor:
+		ker = []
+		for q in range(1, Q + 1):
+			ker.append(self._ramanujan_sum_vec(q, W, device=torch.device("cpu"), dtype=torch.float32))
+		K = torch.stack(ker, dim=0).unsqueeze(1)
+		return K
+
+	def _pad(self, x: torch.Tensor) -> torch.Tensor:
+		if self.causal and self.W > 1:
+			return F.pad(x, (self.W - 1, 0))
+		else:
+			pad = (self.W - 1) // 2
+			return F.pad(x, (pad, self.W - 1 - pad))
+
+	def forward(self,
+				z: torch.Tensor,
+				pos: torch.Tensor = None,
+				valid_mask: torch.Tensor = None,
+				memory_id: str = None,
+				reset_memory: bool = False):
+		B, T, M, D = z.shape
+		device, dtype = z.device, z.dtype
+		if valid_mask is None:
+			valid_mask = torch.ones(B, T, M, device=device, dtype=dtype)
+
+		if self.analysis_proj is None:
+			z_anl = z.mean(dim=-1)
+		else:
+			z_flat = z.view(B * T * M, D)
+			proj = self.analysis_proj(z_flat).view(B, T, M, self.proj_dim)
+			z_anl = proj.mean(dim=-1)
+
+		z_anl = z_anl * valid_mask
+		x = z_anl.permute(0, 2, 1).contiguous()
+		x = x.view(B * M, 1, T)
+		x = self._pad(x)
+
+		rama_k = self.rama_kernels.to(device=device, dtype=dtype)
+		r = F.conv1d(x, rama_k, bias=None, stride=1, padding=0)
+		r = r.view(B, M, self.Q, T).permute(0, 2, 1, 3).contiguous()
+
+		g = self.gate(r.view(B * M, self.Q, T))
+		g = g.view(B, M, self.Q, T).permute(0, 2, 1, 3).contiguous()
+
+		z_syn = (z * valid_mask.unsqueeze(-1)).permute(0, 2, 3, 1).contiguous()
+		y = z_syn.view(B * M * D, 1, T)
+		y = self._pad(y)
+		R = F.conv1d(y, rama_k, bias=None, stride=1, padding=0)
+		R = R.view(B, M, D, self.Q, T).permute(0, 3, 1, 2, 4).contiguous()
+
+		p = (R * g.unsqueeze(3)).sum(dim=1)
+		p = p.permute(0, 3, 1, 2).contiguous()
+
+		h = z + self.beta * p
+		h = valid_mask.unsqueeze(-1) * h + (1.0 - valid_mask.unsqueeze(-1)) * z
+
+		key = memory_id or "default"
+		if reset_memory or (key not in self._mem_state):
+			self._mem_state[key] = torch.zeros(B, M, D, device=device, dtype=dtype)
+		return h, {key: self._mem_state[key]}
+
+
+__all__ += ['SimpleFrameTokenSelector', 'RamaFuse']
 

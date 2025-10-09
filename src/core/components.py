@@ -125,294 +125,131 @@ class FrameTokenCoSelector(nn.Module):
 
         # 僅保留被選影格的 token，未選影格的 token_mask ≈ 0
         token_mask = token_mask_all * frame_mask.unsqueeze(-1)  # [B, T, N]
-"""StatLite Components
-=======================
-精簡版的兩個統計式/貪婪式模組，取代原本的可學共選器 + 圖記憶庫：
-
-1. SimpleFrameTokenSelector
-   - 影格：facility-location（覆蓋） + 可學標量分數（貪婪）
-   - token：k-Center Greedy（最大最小距離覆蓋）
-2. StatMem
-   - 時序統計記憶：Approximate Rank Pooling (ARP) + EMA 平滑
-
-兩者均只依賴 torch，可直接嵌入現有管線；與舊版 I/O 介面保持一致：
-  Selector forward 輸入：x:[B,T,N,D] (mask 可選) → 輸出 (z, frame_idx, token_idx, frame_mask, token_mask)
-  Memory forward 輸入：z:[B,T,M,D] (valid_mask 可選) → 輸出 (h, memory_dict)
-"""
-
-from typing import Optional, Tuple, Dict
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
+        token_mask = token_mask_all * frame_mask.unsqueeze(-1)  # [B, T, N]
 
 
 # -----------------------------
-# Helpers
+# SQuaRe-Fuse (Sliced-Quantile & Quadratic-trend Robust Fusion)
 # -----------------------------
 
-def _safe_cosine(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
-    a = F.normalize(a, dim=-1)
-    b = F.normalize(b, dim=-1)
-    return a @ b.transpose(-1, -2)
+def _legendre_basis(T: int, order: int, device, dtype):
+    t = torch.linspace(-1.0, 1.0, T, device=device, dtype=dtype)
+    P = [torch.ones_like(t)]
+    if order >= 1:
+        P.append(t)
+    for n in range(1, order):
+        P.append(((2 * n + 1) * t * P[n] - n * P[n - 1]) / (n + 1))
+    B = torch.stack(P[: order + 1], dim=0)
+    B = B / (B.pow(2).sum(dim=1, keepdim=True).clamp_min(1e-6).sqrt())
+    return B  # [order+1, T]
 
 
-def _facility_location_greedy(frame_repr: torch.Tensor, k: int, score: Optional[torch.Tensor] = None,
-                              lambda_cov: float = 1.0, lambda_score: float = 0.0,
-                              valid: Optional[torch.Tensor] = None) -> Tuple[torch.Tensor, torch.Tensor]:
-    B, T, D = frame_repr.shape
-    device = frame_repr.device
-    sim_bt = []
-    for b in range(B):
-        fb = frame_repr[b]
-        sim_bt.append(_safe_cosine(fb, fb))
-    sim = torch.stack(sim_bt, dim=0)  # [B,T,T]
-
-    if score is None:
-        score = torch.zeros(B, T, device=device)
-    if valid is None:
-        valid = torch.ones(B, T, device=device)
-
-    frame_idx = torch.zeros(B, k, dtype=torch.long, device=device)
-    frame_mask = torch.zeros(B, T, dtype=frame_repr.dtype, device=device)
-    best_cover = torch.zeros(B, T, device=device)
-    chosen = torch.zeros(B, T, dtype=torch.bool, device=device)
-
-    for step in range(k):
-        best = best_cover.unsqueeze(-1)  # [B,T,1]
-        new_best = torch.maximum(best, sim)
-        cov_gain_all = (new_best - best).sum(dim=1)  # [B,T]
-        total_gain = lambda_cov * cov_gain_all + lambda_score * score
-        total_gain = total_gain.masked_fill(~valid.bool(), float('-inf'))
-        total_gain = total_gain.masked_fill(chosen, float('-inf'))
-        j = torch.argmax(total_gain, dim=1)
-        frame_idx[:, step] = j
-        batch_arange = torch.arange(B, device=device)
-        frame_mask[batch_arange, j] = 1.0
-        bj = sim[batch_arange, :, j]
-        best_cover = torch.maximum(best_cover, bj)
-        chosen[batch_arange, j] = True
-
-    return frame_idx, frame_mask
-
-
-def _kcenter_greedy(X: torch.Tensor, k: int, valid: Optional[torch.Tensor] = None) -> torch.Tensor:
-    N, D = X.shape
-    device = X.device
-    if valid is None:
-        valid = torch.ones(N, device=device, dtype=torch.bool)
-    else:
-        valid = valid.bool()
-    valid_idx = torch.nonzero(valid, as_tuple=False).squeeze(-1)
-    if valid_idx.numel() == 0:
-        return X.new_zeros(k, dtype=torch.long)
-    Xv = X[valid_idx]
-    dists = (Xv ** 2).sum(dim=1)
-    first = torch.argmax(dists)
-    selected = [int(valid_idx[first].item())]
-    min_dist = torch.cdist(X, X[selected].detach(), p=2).squeeze(-1)
-    min_dist[~valid] = -1.0
-    for _ in range(1, k):
-        cand = torch.argmax(min_dist)
-        selected.append(int(cand.item()))
-        new_d = torch.cdist(X, X[cand].unsqueeze(0).detach(), p=2).squeeze(-1)
-        min_dist = torch.minimum(min_dist, new_d)
-        min_dist[~valid] = -1.0
-    return torch.tensor(selected, dtype=torch.long, device=device)
-
-
-class SimpleFrameTokenSelector(nn.Module):
-    def __init__(self,
-                 d_model: int,
-                 frame_topk: int,
-                 token_topk: int,
-                 lambda_cov: float = 1.0,
-                 lambda_score: float = 0.0,
-                 use_cls: bool = False,
-                 hidden: int = 4):
-        super().__init__()
-        self.frame_topk = frame_topk
-        self.token_topk = token_topk
-        self.lambda_cov = lambda_cov
-        self.lambda_score = lambda_score
-        self.use_cls = use_cls
-        self.frame_score_head = nn.Sequential(
-            nn.LayerNorm(d_model),
-            nn.Linear(d_model, hidden * d_model),
-            nn.GELU(),
-            nn.Linear(hidden * d_model, 1),
-        )
-
-    def forward(self,
-                x: torch.Tensor,
-                mask: Optional[torch.Tensor] = None) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        B, T, N, D = x.shape
-        device = x.device
-        if mask is None:
-            mask = torch.ones(B, T, N, device=device, dtype=x.dtype)
-        if self.use_cls and N >= 1:
-            frame_repr = x[:, :, 0, :]
-            valid_frame = torch.ones(B, T, device=device, dtype=torch.bool)
-        else:
-            denom = mask.sum(dim=2, keepdim=False).clamp_min(1e-6)[..., None]
-            frame_repr = (x * mask[..., None]).sum(dim=2) / denom
-            valid_frame = (denom.squeeze(-1) > 0)
-        frame_score = self.frame_score_head(frame_repr).squeeze(-1)
-        frame_idx, frame_mask = _facility_location_greedy(
-            frame_repr, k=self.frame_topk, score=frame_score,
-            lambda_cov=self.lambda_cov, lambda_score=self.lambda_score,
-            valid=valid_frame.to(frame_repr.dtype)
-        )
-        token_idx = torch.zeros(B, self.frame_topk, self.token_topk, dtype=torch.long, device=device)
-        token_mask = torch.zeros(B, T, N, dtype=x.dtype, device=device)
-        batch_arange = torch.arange(B, device=device)
-        for b in range(B):
-            for kf in range(self.frame_topk):
-                t_sel = int(frame_idx[b, kf].item())
-                X = x[b, t_sel]
-                m = mask[b, t_sel] > 0.5
-                idxs = _kcenter_greedy(X, self.token_topk, valid=m)
-                token_idx[b, kf] = idxs
-                token_mask[b, t_sel, idxs] = 1.0
-        x_sel_frames = x[batch_arange[:, None], frame_idx]
-        z = x_sel_frames[batch_arange[:, None, None], torch.arange(self.frame_topk, device=device)[None, :, None], token_idx]
-        return z, frame_idx, token_idx, frame_mask, token_mask
-
-
-from math import gcd, pi
-
-
-class RamaFuse(nn.Module):
+def _soft_quantiles(sorted_vals: torch.Tensor, levels: torch.Tensor, sigma: float = 0.5):
     """
-    Ramanujan-based sequence fusion layer (drop-in for StatMem)
-    Input : z:[B,T,M,D], valid_mask:[B,T,M] (optional)
-    Output: h:[B,T,M,D], memory_dict (kept for API compatibility)
-    No attention / No SSM / No tensor decomposition / No graphs.
+    Differentiable quantiles using Gaussian weights over ranks.
+    sorted_vals: [..., T] (ascending)
+    levels: [Q] in (0,1)
+    returns: [..., Q]
     """
-    def __init__(self,
-                 d_model: int,
-                 max_period: int = 16,
-                 window: int = 16,
-                 proj_dim: int = 0,
-                 causal: bool = True,
-                 beta_init: float = 0.5,
-                 eps: float = 1e-6):
+    *lead, T = sorted_vals.shape
+    ranks = torch.arange(T, device=sorted_vals.device, dtype=sorted_vals.dtype)
+    targets = levels * (T - 1)
+    diff = ranks[None, :] - targets[:, None]  # [Q, T]
+    w = torch.exp(-0.5 * (diff / max(sigma, 1e-6)) ** 2)
+    w = w / w.sum(dim=1, keepdim=True).clamp_min(1e-6)
+    s_flat = sorted_vals.reshape(-1, T)  # [L, T]
+    q = (w @ s_flat.T).T  # [L, Q]
+    return q.reshape(*lead, -1)
+
+
+class SQuaReFuse(nn.Module):
+    """
+    Sliced-Quantile & Quadratic-trend Robust Fusion
+    Input : x:[B,T,N,D], valid_mask:[B,T,N] (optional)
+    Output: h:[B,T,N,D], memory_dict (API parity with RamaFuse)
+    """
+
+    def __init__(
+        self,
+        d_model: int,
+        num_dirs: int = 8,
+        quantiles: Tuple[float, ...] = (0.1, 0.5, 0.9),
+        poly_order: int = 2,
+        beta_init: float = 0.5,
+        ortho_every_forward: bool = True,
+    ):
         super().__init__()
-        self.Q = int(max_period)
-        self.W = int(window)
-        self.causal = causal
-        self.eps = eps
+        self.d_model = d_model
+        self.K = int(num_dirs)
+        self.register_buffer("Q_levels", torch.tensor(quantiles, dtype=torch.float32), persistent=False)
+        self.P = int(poly_order)
+        self.ortho_every_forward = ortho_every_forward
 
-        # optional low-dim projection for analysis branch
-        self.proj_dim = int(proj_dim)
-        if self.proj_dim > 0:
-            self.analysis_proj = nn.Linear(d_model, self.proj_dim, bias=False)
-        else:
-            self.analysis_proj = None
+        # Learn projection matrix (D -> K); we orthonormalize rows each forward
+        self.proj = nn.Linear(d_model, self.K, bias=False)
+        nn.init.kaiming_uniform_(self.proj.weight, a=5 ** 0.5)
 
-        # learnable mixer on Q periodic channels (lightweight, per-token shared across D)
-        self.gate = nn.Sequential(
-            nn.Conv1d(self.Q, self.Q, kernel_size=1, groups=self.Q, bias=True),
+        feat_in = self.K * (len(quantiles) + (self.P + 1))
+        self.head = nn.Sequential(
+            nn.LayerNorm(feat_in),
+            nn.Linear(feat_in, 4 * d_model),
             nn.GELU(),
-            nn.Conv1d(self.Q, self.Q, kernel_size=1, bias=True),
-            nn.Sigmoid()
+            nn.Linear(4 * d_model, d_model),
         )
-
-        # learnable residual scale
         self.beta = nn.Parameter(torch.tensor(beta_init, dtype=torch.float32))
-
-        # precompute Ramanujan filters: [Q, 1, W]
-        self.register_buffer("rama_kernels", self._make_rama_kernels(self.Q, self.W), persistent=False)
-
-        # API-compatible memory dict (not used; kept for drop-in parity)
         self._mem_state: Dict[str, torch.Tensor] = {}
 
-    @staticmethod
-    def _ramanujan_sum_vec(q: int, W: int, device: torch.device, dtype: torch.dtype) -> torch.Tensor:
-        # c_q(n) = sum_{1<=a<=q, gcd(a,q)=1} exp(2π i a n / q); use real part (integer-valued)
-        n = torch.arange(W, device=device, dtype=dtype)  # 0..W-1
-        ks = [a for a in range(1, q + 1) if gcd(a, q) == 1]
-        if len(ks) == 0:
-            return torch.ones(W, device=device, dtype=dtype)
-        angles = torch.outer(torch.tensor(ks, device=device, dtype=dtype), n) * (2.0 * pi / q)
-        c = torch.cos(angles).sum(dim=0)  # real part; sin-sum cancels by symmetry
-        # zero-mean & l2-normalize (improves stability)
-        c = c - c.mean()
-        denom = torch.sqrt(torch.clamp(torch.sum(c * c), min=1e-6))
-        c = c / denom
-        return c
+    def _orthonormalize(self):
+        with torch.no_grad():
+            W = self.proj.weight.data  # [K, D]
+            Q, _ = torch.linalg.qr(W.t(), mode="reduced")  # [D, K]
+            self.proj.weight.data.copy_(Q.t())
 
-    def _make_rama_kernels(self, Q: int, W: int) -> torch.Tensor:
-        # Stack Q periods into a conv bank: [Q, 1, W]
-        ker = []
-        for q in range(1, Q + 1):
-            ker.append(self._ramanujan_sum_vec(q, W, device=torch.device("cpu"), dtype=torch.float32))
-        K = torch.stack(ker, dim=0).unsqueeze(1)  # [Q,1,W]
-        return K
-
-    def _pad(self, x: torch.Tensor) -> torch.Tensor:
-        # Causal or symmetric padding for "same" length output
-        if self.causal and self.W > 1:
-            return F.pad(x, (self.W - 1, 0))
-        else:
-            pad = (self.W - 1) // 2
-            return F.pad(x, (pad, self.W - 1 - pad))
-
-    def forward(self,
-                z: torch.Tensor,                  # [B,T,M,D]
-                pos: torch.Tensor = None,
-                valid_mask: torch.Tensor = None,  # [B,T,M]
-                memory_id: str = None,
-                reset_memory: bool = False):
-        B, T, M, D = z.shape
-        device, dtype = z.device, z.dtype
+    def forward(
+        self,
+        x: torch.Tensor,  # [B,T,N,D]
+        valid_mask: Optional[torch.Tensor] = None,  # [B,T,N]
+        memory_id: str = None,
+        reset_memory: bool = False,
+    ):
+        B, T, N, D = x.shape
+        device, dtype = x.device, x.dtype
         if valid_mask is None:
-            valid_mask = torch.ones(B, T, M, device=device, dtype=dtype)
+            valid_mask = torch.ones(B, T, N, device=device, dtype=dtype)
 
-        # ---- Analysis branch (compute r_{q,t} per token) ----
-        if self.analysis_proj is None:
-            z_anl = z.mean(dim=-1)  # [B,T,M]
-        else:
-            # project per token then mean over channels
-            z_flat = z.view(B * T * M, D)
-            proj = self.analysis_proj(z_flat).view(B, T, M, self.proj_dim)
-            z_anl = proj.mean(dim=-1)  # [B,T,M]
+        if self.ortho_every_forward:
+            self._orthonormalize()
 
-        z_anl = z_anl * valid_mask  # mask padded tokens
-        x = z_anl.permute(0, 2, 1).contiguous()          # [B,M,T]
-        x = x.view(B * M, 1, T)                          # [BM,1,T]
-        x = self._pad(x)
+        # 1) Project to K directions: v = x @ U (U:[D,K]) => [B,T,N,K]
+        U = self.proj.weight.t()  # [D,K]
+        v = torch.einsum("btnd,dk->btnk", x, U)  # [B,T,N,K]
+        v = v * valid_mask[..., None]
 
-        rama_k = self.rama_kernels.to(device=device, dtype=dtype)  # [Q,1,W]
-        r = F.conv1d(x, rama_k, bias=None, stride=1, padding=0)    # [BM,Q,T]
-        r = r.view(B, M, self.Q, T).permute(0, 2, 1, 3).contiguous()  # [B,Q,M,T]
+        # 2) Differentiable quantiles along time
+        s, _ = torch.sort(v.permute(0, 2, 3, 1).contiguous(), dim=-1)  # [B,N,K,T]
+        levels = self.Q_levels.to(device=device, dtype=dtype)
+        qv = _soft_quantiles(s, levels=levels, sigma=max(0.5, T / 16))  # [B,N,K*Q]
+        qv = qv.view(B, N, self.K, -1)  # [B,N,K,Q]
 
-        # gating over Q (per token/time)
-        g = self.gate(r.view(B * M, self.Q, T))  # [BM,Q,T]
-        g = g.view(B, M, self.Q, T).permute(0, 2, 1, 3).contiguous()  # [B,Q,M,T]
+        # 3) Legendre trend coefficients along time
+        Bmat = _legendre_basis(T, self.P, device, dtype)  # [P+1, T]
+        v_bnkt = v.permute(0, 2, 3, 1).contiguous()  # [B,N,K,T]
+        coeff = torch.einsum("bnkt,pt->bnkp", v_bnkt, Bmat)  # [B,N,K,P+1]
 
-        # ---- Synthesis branch (apply same filters to full D channels) ----
-        z_syn = (z * valid_mask.unsqueeze(-1)).permute(0, 2, 3, 1).contiguous()  # [B,M,D,T]
-        y = z_syn.view(B * M * D, 1, T)
-        y = self._pad(y)
-        R = F.conv1d(y, rama_k, bias=None, stride=1, padding=0)  # [B*M*D, Q, T]
-        R = R.view(B, M, D, self.Q, T).permute(0, 3, 1, 2, 4).contiguous()  # [B,Q,M,D,T]
+        feats = torch.cat([qv, coeff], dim=-1).reshape(B, N, -1)  # [B,N, K*(Q+P+1)]
+        y = self.head(feats)  # [B,N,D]
 
-        # weighted sum across periods
-        p = (R * g.unsqueeze(3)).sum(dim=1)  # [B,M,D,T]
-        p = p.permute(0, 3, 1, 2).contiguous()  # [B,T,M,D]
+        # Broadcast over time and residual fuse
+        y_btnd = y[:, None, :, :].expand(B, T, N, D)
+        h = x + self.beta * y_btnd
+        h = valid_mask[..., None] * h + (1.0 - valid_mask[..., None]) * x
 
-        # residual output + keep padding positions unchanged
-        h = z + self.beta * p
-        h = valid_mask.unsqueeze(-1) * h + (1.0 - valid_mask.unsqueeze(-1)) * z
-
-        # API-compatible memory dict (no recurrent state by default)
         key = memory_id or "default"
         if reset_memory or (key not in self._mem_state):
-            self._mem_state[key] = torch.zeros(B, M, D, device=device, dtype=dtype)
+            self._mem_state[key] = torch.zeros(B, N, D, device=device, dtype=dtype)
         return h, {key: self._mem_state[key]}
 
 
 __all__ = [
-    'SimpleFrameTokenSelector',
-    'RamaFuse'
+    'SQuaReFuse',
 ]
