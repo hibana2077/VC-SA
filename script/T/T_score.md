@@ -2,7 +2,8 @@
 
 ## Backbone Model
 
-- vit_base_patch16_224
+- vit_base_patch16_224(1~20)
+- vit_base_patch16_224.dino
 
 ## Summary of Test Accuracies
 
