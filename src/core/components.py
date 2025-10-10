@@ -199,7 +199,9 @@ class SQuaReFuse(nn.Module):
             nn.GELU(),
             nn.Linear(4 * d_model, d_model),
         )
-        self.beta = nn.Parameter(torch.tensor(beta_init, dtype=torch.float32))
+        # Per-channel residual scale (vector gate). Shape: [D]
+        # Initialized to beta_init for all channels.
+        self.beta = nn.Parameter(torch.full((d_model,), float(beta_init), dtype=torch.float32))
         self._mem_state: Dict[str, torch.Tensor] = {}
 
     def _orthonormalize(self):
@@ -244,14 +246,20 @@ class SQuaReFuse(nn.Module):
 
         # Broadcast over time and residual fuse
         y_btnd = y[:, None, :, :].expand(B, T, N, D)
-        h = x + self.beta * y_btnd
+        # Vector gate beta: broadcast to [B,T,N,D]
+        h = x + self.beta[None, None, None, :] * y_btnd
         h = valid_mask[..., None] * h + (1.0 - valid_mask[..., None]) * x
 
         key = memory_id or "default"
         if reset_memory or (key not in self._mem_state):
             self._mem_state[key] = torch.zeros(B, N, D, device=device, dtype=dtype)
+        # Compute residual impact ratio r for logging (detach to avoid autograd overhead)
+        with torch.no_grad():
+            num = ((self.beta[None, None, None, :] * y_btnd).pow(2).sum(dim=-1).sqrt()).mean()
+            den = (x.pow(2).sum(dim=-1).sqrt()).mean().clamp_min(1e-9)
+            r = (num / den).detach()
         # Note: memory is departed from RamaFuse; kept for API parity
-        return h, {key: self._mem_state[key]}
+        return h, {key: self._mem_state[key], 'r': r}
 
 
 __all__ = [

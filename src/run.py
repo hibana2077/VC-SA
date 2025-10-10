@@ -117,7 +117,11 @@ class PeriodicPrinterCallback(L.Callback):
             'train/loss', 'loss', 'train_loss',
             'train/acc', 'val/acc', 'test/acc',
             'train/grad_norm_pre_clip', 'train/grad_norm_post_clip',
-            'square/beta'
+            # SQuaReFuse metrics
+            # 'square/r',
+            # 'square/beta/mean', 'square/beta/mean_abs', 'square/beta/median',
+            # 'square/beta/p10', 'square/beta/p90',
+            # 'square/beta/neff', 'square/beta/neff_ratio'
         ]:
             if key in metrics:
                 val = metrics[key]
@@ -151,7 +155,11 @@ class EpochSummaryPrinter(L.Callback):
             'val/acc', 'val/loss',
             'epoch_test/acc', 'epoch_test/loss',
             'test/acc', 'test/loss',
-            'square/beta'
+            # SQuaReFuse metrics
+            'square/r',
+            'square/beta/mean', 'square/beta/mean_abs', 'square/beta/median',
+            'square/beta/p10', 'square/beta/p90',
+            'square/beta/neff', 'square/beta/neff_ratio'
         ]
         self.extra_keys = extra_keys or []
 

@@ -259,7 +259,11 @@ class GraphSamplerActionModel(L.LightningModule):
         tokens = tokens.view(B, T, N, D)
         
         # Temporal fusion directly on full token grid (no selection)
-        h, _ = self.mem_bank(tokens, reset_memory=True)
+        h, mem = self.mem_bank(tokens, reset_memory=True)
+        # Stash residual impact ratio r for logging if available
+        if isinstance(mem, dict) and 'r' in mem:
+            # Save on module for access in steps
+            self._last_r = float(mem['r'].detach().cpu()) if torch.is_tensor(mem['r']) else float(mem['r'])
         
         # Global average pooling over time and tokens
         feat = h.mean(dim=(1, 2))  # [B, D]
@@ -275,6 +279,10 @@ class GraphSamplerActionModel(L.LightningModule):
         logits = self(clip)
         loss = self.criterion(logits, label)
         acc = (logits.argmax(dim=-1) == label).float().mean()
+
+        # Log residual impact ratio r if computed
+        if hasattr(self, '_last_r'):
+            self.log('square/r', self._last_r, on_step=True, on_epoch=True, prog_bar=False)
         
         self.log('train/loss', loss, prog_bar=True, on_step=True, on_epoch=True)
         self.log('train/acc', acc, prog_bar=True, on_step=True, on_epoch=True)
@@ -305,6 +313,10 @@ class GraphSamplerActionModel(L.LightningModule):
         logits = self(clip)
         loss = self.criterion(logits, label)
         acc = (logits.argmax(dim=-1) == label).float().mean()
+
+        # Log residual impact ratio r if computed
+        if hasattr(self, '_last_r'):
+            self.log('square/r', self._last_r, on_step=False, on_epoch=True, prog_bar=False)
         
         self.log('val/loss', loss, prog_bar=True, on_epoch=True)
         self.log('val/acc', acc, prog_bar=True, on_epoch=True)
@@ -330,13 +342,24 @@ class GraphSamplerActionModel(L.LightningModule):
         Optionally runs test evaluation without invoking Trainer.test
         to avoid nested training loops.
         """
-        # Always log the learnable beta from SQuaReFuse for EpochSummary reporting
+        # Log beta vector statistics from SQuaReFuse for EpochSummary reporting
         try:
-            beta_val = float(self.mem_bank.beta.detach().cpu())
+            b = self.mem_bank.beta.detach().float().cpu()
+            mean = b.mean().item()
+            mean_abs = b.abs().mean().item()
+            p10, med, p90 = torch.quantile(b, torch.tensor([0.1, 0.5, 0.9])).tolist()
+            neff = (b.sum() ** 2 / (b.pow(2).sum().clamp_min(1e-9))).item()
+            neff_ratio = neff / float(b.numel())
+            # Emit metrics
+            self.log('square/beta/mean', mean, on_epoch=True, prog_bar=False)
+            self.log('square/beta/mean_abs', mean_abs, on_epoch=True, prog_bar=False)
+            self.log('square/beta/median', med, on_epoch=True, prog_bar=False)
+            self.log('square/beta/p10', p10, on_epoch=True, prog_bar=False)
+            self.log('square/beta/p90', p90, on_epoch=True, prog_bar=False)
+            self.log('square/beta/neff', neff, on_epoch=True, prog_bar=False)
+            self.log('square/beta/neff_ratio', neff_ratio, on_epoch=True, prog_bar=False)
         except Exception:
-            beta_val = self.mem_bank.beta.detach()
-        # on_epoch=True to ensure it's available in callback_metrics
-        self.log('square/beta', beta_val, prog_bar=False, on_epoch=True)
+            pass
 
         if not self.test_each_epoch:
             return
@@ -373,7 +396,18 @@ class GraphSamplerActionModel(L.LightningModule):
     def on_validation_epoch_end(self):
         """Ensure beta is logged at validation epoch end as well for summary printing."""
         try:
-            beta_val = float(self.mem_bank.beta.detach().cpu())
+            b = self.mem_bank.beta.detach().float().cpu()
+            mean = b.mean().item()
+            mean_abs = b.abs().mean().item()
+            p10, med, p90 = torch.quantile(b, torch.tensor([0.1, 0.5, 0.9])).tolist()
+            neff = (b.sum() ** 2 / (b.pow(2).sum().clamp_min(1e-9))).item()
+            neff_ratio = neff / float(b.numel())
+            self.log('square/beta/mean', mean, on_epoch=True, prog_bar=False)
+            self.log('square/beta/mean_abs', mean_abs, on_epoch=True, prog_bar=False)
+            self.log('square/beta/median', med, on_epoch=True, prog_bar=False)
+            self.log('square/beta/p10', p10, on_epoch=True, prog_bar=False)
+            self.log('square/beta/p90', p90, on_epoch=True, prog_bar=False)
+            self.log('square/beta/neff', neff, on_epoch=True, prog_bar=False)
+            self.log('square/beta/neff_ratio', neff_ratio, on_epoch=True, prog_bar=False)
         except Exception:
-            beta_val = self.mem_bank.beta.detach()
-        self.log('square/beta', beta_val, prog_bar=False, on_epoch=True)
+            pass
