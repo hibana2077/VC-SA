@@ -165,7 +165,7 @@ class GraphSamplerActionModel(L.LightningModule):
         d_model, n_tokens = self._probe_backbone_dims()
         # Selection removed; frame_topk/token_topk kept for CLI backward-compat but unused
         # Replace RamaFuse with SQuaReFuse (Sliced-Quantile & Quadratic-trend Robust Fusion)
-        self.mem_bank = SQuaReFuse(
+        self.fusion = SQuaReFuse(
             d_model=d_model,
             num_dirs=square_num_dirs,
             quantiles=tuple(square_quantiles),
@@ -259,7 +259,7 @@ class GraphSamplerActionModel(L.LightningModule):
         tokens = tokens.view(B, T, N, D)
         
         # Temporal fusion directly on full token grid (no selection)
-        h, mem = self.mem_bank(tokens, reset_memory=True)
+        h, mem = self.fusion(tokens)
         # Stash residual impact ratio r for logging if available
         if isinstance(mem, dict) and 'r' in mem:
             # Save on module for access in steps
@@ -344,7 +344,7 @@ class GraphSamplerActionModel(L.LightningModule):
         """
         # Log beta vector statistics from SQuaReFuse for EpochSummary reporting
         try:
-            b = self.mem_bank.beta.detach().float().cpu()
+            b = self.fusion.beta.detach().float().cpu()
             mean = b.mean().item()
             mean_abs = b.abs().mean().item()
             p10, med, p90 = torch.quantile(b, torch.tensor([0.1, 0.5, 0.9])).tolist()
@@ -396,7 +396,7 @@ class GraphSamplerActionModel(L.LightningModule):
     def on_validation_epoch_end(self):
         """Ensure beta is logged at validation epoch end as well for summary printing."""
         try:
-            b = self.mem_bank.beta.detach().float().cpu()
+            b = self.fusion.beta.detach().float().cpu()
             mean = b.mean().item()
             mean_abs = b.abs().mean().item()
             p10, med, p90 = torch.quantile(b, torch.tensor([0.1, 0.5, 0.9])).tolist()

@@ -250,16 +250,12 @@ class SQuaReFuse(nn.Module):
         h = x + self.beta[None, None, None, :] * y_btnd
         h = valid_mask[..., None] * h + (1.0 - valid_mask[..., None]) * x
 
-        key = memory_id or "default"
-        if reset_memory or (key not in self._mem_state):
-            self._mem_state[key] = torch.zeros(B, N, D, device=device, dtype=dtype)
         # Compute residual impact ratio r for logging (detach to avoid autograd overhead)
         with torch.no_grad():
             num = ((self.beta[None, None, None, :] * y_btnd).pow(2).sum(dim=-1).sqrt()).mean()
             den = (x.pow(2).sum(dim=-1).sqrt()).mean().clamp_min(1e-9)
             r = (num / den).detach()
-        # Note: memory is departed from RamaFuse; kept for API parity
-        return h, {key: self._mem_state[key], 'r': r}
+        return h, {'r': r}
 
 
 __all__ = [
