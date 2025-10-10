@@ -16,8 +16,6 @@ python3 -c "import timm; timm.create_model('coat_lite_medium.in1k', pretrained=T
 - xcit_large_24_p8_224.fb_dist_in1k
 - beitv2_large_patch16_224.in1k_ft_in22k
 - vit_tiny_patch16_224.augreg_in21k_ft_in1k
-- pit_xs_224.in1k
-- pit_b_224.in1k
 - tnt_s_patch16_224.in1k
 - tnt_b_patch16_224.in1k
 - coat_mini.in1k
@@ -39,8 +37,6 @@ python3 -c "import timm; timm.create_model('coat_lite_medium.in1k', pretrained=T
 | M010 | xcit_large_24_p8_224.fb_dist_in1k | 0.7332 |
 | M011 | beitv2_large_patch16_224.in1k_ft_in22k | 0.7983 |
 | M012 | vit_tiny_patch16_224.augreg_in21k_ft_in1k | ? |
-| M013 | pit_xs_224.in1k | ? |
-| M014 | pit_b_224.in1k | ? |
 | M015 | tnt_s_patch16_224.in1k | ? |
 | M016 | tnt_b_patch16_224.in1k | ? |
 | M017 | coat_mini.in1k | ? |
