@@ -213,9 +213,7 @@ class SQuaReFuse(nn.Module):
     def forward(
         self,
         x: torch.Tensor,  # [B,T,N,D]
-        valid_mask: Optional[torch.Tensor] = None,  # [B,T,N]
-        memory_id: str = None,
-        reset_memory: bool = False,
+        valid_mask: Optional[torch.Tensor] = None
     ):
         B, T, N, D = x.shape
         device, dtype = x.device, x.dtype
