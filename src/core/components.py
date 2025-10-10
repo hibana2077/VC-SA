@@ -166,7 +166,7 @@ class SQuaReFuse(nn.Module):
     """
     Sliced-Quantile & Quadratic-trend Robust Fusion
     Input : x:[B,T,N,D], valid_mask:[B,T,N] (optional)
-    Output: h:[B,T,N,D], memory_dict (API parity with RamaFuse)
+    Output: h:[B,T,N,D], dict with 'r' (residual impact ratio)
     K: num_dirs: int, 投影方向數
     Q: quantiles: Tuple[float,...], 量化切片
     P: poly_order: int, 多項式階數
