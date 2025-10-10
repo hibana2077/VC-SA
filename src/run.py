@@ -116,7 +116,8 @@ class PeriodicPrinterCallback(L.Callback):
         for key in [
             'train/loss', 'loss', 'train_loss',
             'train/acc', 'val/acc', 'test/acc',
-            'train/grad_norm_pre_clip', 'train/grad_norm_post_clip'
+            'train/grad_norm_pre_clip', 'train/grad_norm_post_clip',
+            'square/beta'
         ]:
             if key in metrics:
                 val = metrics[key]
@@ -149,7 +150,8 @@ class EpochSummaryPrinter(L.Callback):
             'train/acc', 'train/loss',
             'val/acc', 'val/loss',
             'epoch_test/acc', 'epoch_test/loss',
-            'test/acc', 'test/loss'
+            'test/acc', 'test/loss',
+            'square/beta'
         ]
         self.extra_keys = extra_keys or []
 

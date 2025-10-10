@@ -250,6 +250,7 @@ class SQuaReFuse(nn.Module):
         key = memory_id or "default"
         if reset_memory or (key not in self._mem_state):
             self._mem_state[key] = torch.zeros(B, N, D, device=device, dtype=dtype)
+        # Note: memory is departed from RamaFuse; kept for API parity
         return h, {key: self._mem_state[key]}
 
 

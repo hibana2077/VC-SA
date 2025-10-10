@@ -330,6 +330,14 @@ class GraphSamplerActionModel(L.LightningModule):
         Optionally runs test evaluation without invoking Trainer.test
         to avoid nested training loops.
         """
+        # Always log the learnable beta from SQuaReFuse for EpochSummary reporting
+        try:
+            beta_val = float(self.mem_bank.beta.detach().cpu())
+        except Exception:
+            beta_val = self.mem_bank.beta.detach()
+        # on_epoch=True to ensure it's available in callback_metrics
+        self.log('square/beta', beta_val, prog_bar=False, on_epoch=True)
+
         if not self.test_each_epoch:
             return
         
@@ -361,3 +369,11 @@ class GraphSamplerActionModel(L.LightningModule):
             self.log('epoch_test/loss', test_loss, prog_bar=False)
         
         self.train()
+
+    def on_validation_epoch_end(self):
+        """Ensure beta is logged at validation epoch end as well for summary printing."""
+        try:
+            beta_val = float(self.mem_bank.beta.detach().cpu())
+        except Exception:
+            beta_val = self.mem_bank.beta.detach()
+        self.log('square/beta', beta_val, prog_bar=False, on_epoch=True)
