@@ -194,7 +194,8 @@ class SQuaReFuse(nn.Module):
 
         feat_in = self.K * (len(quantiles) + (self.P + 1))
         self.head = nn.Sequential(
-            nn.LayerNorm(feat_in),
+            # nn.LayerNorm(feat_in),
+            nn.RMSNorm(feat_in),
             nn.Linear(feat_in, 4 * d_model),
             nn.GELU(),
             nn.Linear(4 * d_model, d_model),
