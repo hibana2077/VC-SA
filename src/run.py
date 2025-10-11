@@ -157,6 +157,7 @@ class EpochSummaryPrinter(L.Callback):
             'test/acc', 'test/loss',
             # SQuaReFuse metrics
             'square/r',
+            'square/r_feat/mean', 'square/r_feat/max', 'square/r_feat/top1', 'square/r_feat/top2', 'square/r_feat/top3',
             'square/beta/mean', 'square/beta/mean_abs', 'square/beta/median',
             'square/beta/p10', 'square/beta/p90',
             'square/beta/neff', 'square/beta/neff_ratio'

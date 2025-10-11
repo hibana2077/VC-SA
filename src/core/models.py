@@ -264,6 +264,16 @@ class GraphSamplerActionModel(L.LightningModule):
         if isinstance(mem, dict) and 'r' in mem:
             # Save on module for access in steps
             self._last_r = float(mem['r'].detach().cpu()) if torch.is_tensor(mem['r']) else float(mem['r'])
+        # Log per-feature contributions summary if available
+        if isinstance(mem, dict) and 'r_feat' in mem and torch.is_tensor(mem['r_feat']) and mem['r_feat'].numel() > 0:
+            r_feat = mem['r_feat'].detach().float().cpu()
+            self._last_r_feat_mean = float(r_feat.mean().item())
+            self._last_r_feat_max = float(r_feat.max().item())
+            # top-3 values (pad if fewer)
+            k = min(3, r_feat.numel())
+            topk_vals, topk_idx = torch.topk(r_feat, k)
+            self._last_r_feat_top = [float(v.item()) for v in topk_vals]
+            self._last_r_feat_top_idx = [int(i.item()) for i in topk_idx]
         
         # Global average pooling over time and tokens
         feat = h.mean(dim=(1, 2))  # [B, D]
@@ -283,6 +293,13 @@ class GraphSamplerActionModel(L.LightningModule):
         # Log residual impact ratio r if computed
         if hasattr(self, '_last_r'):
             self.log('square/r', self._last_r, on_step=True, on_epoch=True, prog_bar=False)
+        if hasattr(self, '_last_r_feat_mean'):
+            self.log('square/r_feat/mean', self._last_r_feat_mean, on_step=True, on_epoch=True, prog_bar=False)
+        if hasattr(self, '_last_r_feat_max'):
+            self.log('square/r_feat/max', self._last_r_feat_max, on_step=True, on_epoch=True, prog_bar=False)
+            # Also log top-3 as individual keys for quick glance
+            for i, v in enumerate(getattr(self, '_last_r_feat_top', [])[:3]):
+                self.log(f'square/r_feat/top{i+1}', v, on_step=True, on_epoch=True, prog_bar=False)
         
         self.log('train/loss', loss, prog_bar=True, on_step=True, on_epoch=True)
         self.log('train/acc', acc, prog_bar=True, on_step=True, on_epoch=True)
@@ -317,6 +334,12 @@ class GraphSamplerActionModel(L.LightningModule):
         # Log residual impact ratio r if computed
         if hasattr(self, '_last_r'):
             self.log('square/r', self._last_r, on_step=False, on_epoch=True, prog_bar=False)
+        if hasattr(self, '_last_r_feat_mean'):
+            self.log('square/r_feat/mean', self._last_r_feat_mean, on_step=False, on_epoch=True, prog_bar=False)
+        if hasattr(self, '_last_r_feat_max'):
+            self.log('square/r_feat/max', self._last_r_feat_max, on_step=False, on_epoch=True, prog_bar=False)
+            for i, v in enumerate(getattr(self, '_last_r_feat_top', [])[:3]):
+                self.log(f'square/r_feat/top{i+1}', v, on_step=False, on_epoch=True, prog_bar=False)
         
         self.log('val/loss', loss, prog_bar=True, on_epoch=True)
         self.log('val/acc', acc, prog_bar=True, on_epoch=True)
