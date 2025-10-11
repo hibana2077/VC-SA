@@ -23,7 +23,7 @@ from pathlib import Path
 import sys
 
 from .components import (
-    SQuaReFuse,
+    SHiFTFuse,
 )
 
 
@@ -164,12 +164,12 @@ class GraphSamplerActionModel(L.LightningModule):
         # Probe backbone to get dimensions
         d_model, n_tokens = self._probe_backbone_dims()
         # Selection removed; frame_topk/token_topk kept for CLI backward-compat but unused
-        # Replace RamaFuse with SQuaReFuse (Sliced-Quantile & Quadratic-trend Robust Fusion)
-        self.fusion = SQuaReFuse(
+        # Replace RamaFuse with SHiFT-Fuse
+        self.fusion = SHiFTFuse(
             d_model=d_model,
             num_dirs=square_num_dirs,
-            quantiles=tuple(square_quantiles),
-            poly_order=square_poly_order,
+            P=square_poly_order,
+            qs=tuple(square_quantiles),
             beta_init=square_beta,
             ortho_every_forward=square_ortho,
         )
@@ -260,20 +260,6 @@ class GraphSamplerActionModel(L.LightningModule):
         
         # Temporal fusion directly on full token grid (no selection)
         h, mem = self.fusion(tokens)
-        # Stash residual impact ratio r for logging if available
-        if isinstance(mem, dict) and 'r' in mem:
-            # Save on module for access in steps
-            self._last_r = float(mem['r'].detach().cpu()) if torch.is_tensor(mem['r']) else float(mem['r'])
-        # Log per-feature contributions summary if available
-        if isinstance(mem, dict) and 'r_feat' in mem and torch.is_tensor(mem['r_feat']) and mem['r_feat'].numel() > 0:
-            r_feat = mem['r_feat'].detach().float().cpu()
-            self._last_r_feat_mean = float(r_feat.mean().item())
-            self._last_r_feat_max = float(r_feat.max().item())
-            # top-3 values (pad if fewer)
-            k = min(3, r_feat.numel())
-            topk_vals, topk_idx = torch.topk(r_feat, k)
-            self._last_r_feat_top = [float(v.item()) for v in topk_vals]
-            self._last_r_feat_top_idx = [int(i.item()) for i in topk_idx]
         
         # Global average pooling over time and tokens
         feat = h.mean(dim=(1, 2))  # [B, D]
@@ -290,16 +276,7 @@ class GraphSamplerActionModel(L.LightningModule):
         loss = self.criterion(logits, label)
         acc = (logits.argmax(dim=-1) == label).float().mean()
 
-        # Log residual impact ratio r if computed
-        if hasattr(self, '_last_r'):
-            self.log('square/r', self._last_r, on_step=True, on_epoch=True, prog_bar=False)
-        if hasattr(self, '_last_r_feat_mean'):
-            self.log('square/r_feat/mean', self._last_r_feat_mean, on_step=True, on_epoch=True, prog_bar=False)
-        if hasattr(self, '_last_r_feat_max'):
-            self.log('square/r_feat/max', self._last_r_feat_max, on_step=True, on_epoch=True, prog_bar=False)
-            # Also log top-3 as individual keys for quick glance
-            for i, v in enumerate(getattr(self, '_last_r_feat_top', [])[:3]):
-                self.log(f'square/r_feat/top{i+1}', v, on_step=True, on_epoch=True, prog_bar=False)
+        # No SQuaRe-specific logs; SHiFT-Fuse returns weight matrix W available if needed
         
         self.log('train/loss', loss, prog_bar=True, on_step=True, on_epoch=True)
         self.log('train/acc', acc, prog_bar=True, on_step=True, on_epoch=True)
@@ -331,15 +308,7 @@ class GraphSamplerActionModel(L.LightningModule):
         loss = self.criterion(logits, label)
         acc = (logits.argmax(dim=-1) == label).float().mean()
 
-        # Log residual impact ratio r if computed
-        if hasattr(self, '_last_r'):
-            self.log('square/r', self._last_r, on_step=False, on_epoch=True, prog_bar=False)
-        if hasattr(self, '_last_r_feat_mean'):
-            self.log('square/r_feat/mean', self._last_r_feat_mean, on_step=False, on_epoch=True, prog_bar=False)
-        if hasattr(self, '_last_r_feat_max'):
-            self.log('square/r_feat/max', self._last_r_feat_max, on_step=False, on_epoch=True, prog_bar=False)
-            for i, v in enumerate(getattr(self, '_last_r_feat_top', [])[:3]):
-                self.log(f'square/r_feat/top{i+1}', v, on_step=False, on_epoch=True, prog_bar=False)
+        # No SQuaRe-specific logs here
         
         self.log('val/loss', loss, prog_bar=True, on_epoch=True)
         self.log('val/acc', acc, prog_bar=True, on_epoch=True)
@@ -365,7 +334,7 @@ class GraphSamplerActionModel(L.LightningModule):
         Optionally runs test evaluation without invoking Trainer.test
         to avoid nested training loops.
         """
-        # Log beta vector statistics from SQuaReFuse for EpochSummary reporting
+        # Log beta vector statistics from SHiFT-Fuse for EpochSummary reporting
         try:
             b = self.fusion.beta.detach().float().cpu()
             mean = b.mean().item()
@@ -374,13 +343,13 @@ class GraphSamplerActionModel(L.LightningModule):
             neff = (b.sum() ** 2 / (b.pow(2).sum().clamp_min(1e-9))).item()
             neff_ratio = neff / float(b.numel())
             # Emit metrics
-            self.log('square/beta/mean', mean, on_epoch=True, prog_bar=False)
-            self.log('square/beta/mean_abs', mean_abs, on_epoch=True, prog_bar=False)
-            self.log('square/beta/median', med, on_epoch=True, prog_bar=False)
-            self.log('square/beta/p10', p10, on_epoch=True, prog_bar=False)
-            self.log('square/beta/p90', p90, on_epoch=True, prog_bar=False)
-            self.log('square/beta/neff', neff, on_epoch=True, prog_bar=False)
-            self.log('square/beta/neff_ratio', neff_ratio, on_epoch=True, prog_bar=False)
+            self.log('shift/beta/mean', mean, on_epoch=True, prog_bar=False)
+            self.log('shift/beta/mean_abs', mean_abs, on_epoch=True, prog_bar=False)
+            self.log('shift/beta/median', med, on_epoch=True, prog_bar=False)
+            self.log('shift/beta/p10', p10, on_epoch=True, prog_bar=False)
+            self.log('shift/beta/p90', p90, on_epoch=True, prog_bar=False)
+            self.log('shift/beta/neff', neff, on_epoch=True, prog_bar=False)
+            self.log('shift/beta/neff_ratio', neff_ratio, on_epoch=True, prog_bar=False)
         except Exception:
             pass
 
@@ -425,12 +394,12 @@ class GraphSamplerActionModel(L.LightningModule):
             p10, med, p90 = torch.quantile(b, torch.tensor([0.1, 0.5, 0.9])).tolist()
             neff = (b.sum() ** 2 / (b.pow(2).sum().clamp_min(1e-9))).item()
             neff_ratio = neff / float(b.numel())
-            self.log('square/beta/mean', mean, on_epoch=True, prog_bar=False)
-            self.log('square/beta/mean_abs', mean_abs, on_epoch=True, prog_bar=False)
-            self.log('square/beta/median', med, on_epoch=True, prog_bar=False)
-            self.log('square/beta/p10', p10, on_epoch=True, prog_bar=False)
-            self.log('square/beta/p90', p90, on_epoch=True, prog_bar=False)
-            self.log('square/beta/neff', neff, on_epoch=True, prog_bar=False)
-            self.log('square/beta/neff_ratio', neff_ratio, on_epoch=True, prog_bar=False)
+            self.log('shift/beta/mean', mean, on_epoch=True, prog_bar=False)
+            self.log('shift/beta/mean_abs', mean_abs, on_epoch=True, prog_bar=False)
+            self.log('shift/beta/median', med, on_epoch=True, prog_bar=False)
+            self.log('shift/beta/p10', p10, on_epoch=True, prog_bar=False)
+            self.log('shift/beta/p90', p90, on_epoch=True, prog_bar=False)
+            self.log('shift/beta/neff', neff, on_epoch=True, prog_bar=False)
+            self.log('shift/beta/neff_ratio', neff_ratio, on_epoch=True, prog_bar=False)
         except Exception:
             pass

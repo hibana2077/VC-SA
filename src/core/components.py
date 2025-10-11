@@ -18,7 +18,7 @@ from typing import Optional, Tuple, Dict, List
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from .fast_soft_sort.pytorch_ops import soft_sort
+# SoftSort no longer required for SHiFT-Fuse; keep module import list minimal
 
 
 def _topk_straight_through(logits: torch.Tensor, k: int, dim: int = -1, tau: float = 1.0):
@@ -134,38 +134,24 @@ class FrameTokenCoSelector(nn.Module):
 # -----------------------------
 
 
-class AdditiveHead(nn.Module):
-    """
-    NAM-style additive head: per-feature tiny MLPs whose outputs sum to [B,N,D].
+class SparseNonnegLinearHead(nn.Module):
+        """A single linear layer with non-negative weights via softplus for interpretability.
 
-    Inputs:
-      - z: [B, N, F] scalar features
-    Returns:
-      - y: [B, N, D]
-      - parts (optional): List[Tensor] length F, each [B, N, D] contribution
-    """
-    def __init__(self, feat_in: int, d_model: int, width: int = 16, return_parts: bool = False):
-        super().__init__()
-        self.feat_in = feat_in
-        self.d_model = d_model
-        self.return_parts = return_parts
-        blocks = []
-        for _ in range(feat_in):
-            blocks.append(nn.Sequential(
-                nn.Linear(1, width),
-                nn.GELU(),
-                nn.Linear(width, d_model, bias=False),
-            ))
-        self.blocks = nn.ModuleList(blocks)
+        Inputs:
+            - feats: [B, N, F]
+        Returns:
+            - y: [B, N, D]
+            - W: [F, D] effective non-negative weights
+        """
+        def __init__(self, feat_in: int, d_model: int):
+                super().__init__()
+                self.W_raw = nn.Parameter(torch.empty(feat_in, d_model))
+                nn.init.xavier_uniform_(self.W_raw)
 
-    def forward(self, z: torch.Tensor):  # z: [B, N, F]
-        parts: List[torch.Tensor] = []
-        for j, blk in enumerate(self.blocks):
-            parts.append(blk(z[..., j:j+1]))  # [B, N, D]
-        y = torch.stack(parts, dim=-1).sum(-1)  # [B, N, D]
-        if self.return_parts:
-            return y, parts
-        return y
+        def forward(self, feats: torch.Tensor):
+                W = F.softplus(self.W_raw)  # non-negative
+                y = feats @ W               # [B,N,D]
+                return y, W
 
 def _legendre_basis(T: int, order: int, device, dtype):
     t = torch.linspace(-1.0, 1.0, T, device=device, dtype=dtype)
@@ -179,102 +165,114 @@ def _legendre_basis(T: int, order: int, device, dtype):
     return B  # [order+1, T]
 
 
-def _soft_quantiles(sorted_vals: torch.Tensor, levels: torch.Tensor, sigma: float = 0.5):
+class SoftHistogram1D(nn.Module):
+    """Soft histogram pooling layer along time for each projected series.
+
+    Produces a differentiable histogram with Gaussian kernel assignments.
     """
-    Differentiable quantiles using Gaussian weights over ranks.
-    sorted_vals: [..., T] (ascending)
-    levels: [Q] in (0,1)
+    def __init__(self, bins: int = 16, value_range: Tuple[float, float] = (-5.0, 5.0), sigma: float = 0.5):
+        super().__init__()
+        self.bins = int(bins)
+        edges = torch.linspace(float(value_range[0]), float(value_range[1]), self.bins)
+        self.register_buffer('centers', edges, persistent=False)
+        self.sigma = float(sigma)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # x: [B,N,K,T]
+        x = x.unsqueeze(-1)  # [B,N,K,T,1]
+        dist2 = (x - self.centers) ** 2  # [B,N,K,T,B]
+        w = torch.exp(-0.5 * dist2 / (self.sigma ** 2 + 1e-12))
+        hist = w.sum(dim=-2) + 1e-8  # sum over T -> [B,N,K,B]
+        hist = hist / hist.sum(dim=-1, keepdim=True).clamp_min(1e-12)
+        return hist
+
+
+def pseudo_quantiles_from_hist(hist: torch.Tensor, qs: Tuple[float, ...]) -> torch.Tensor:
+    """Extract approximate quantiles from a CDF built from a soft histogram.
+
+    Returns indices normalized to [0,1] with simple argmax; can be refined later.
+    hist: [..., B]
+    qs: tuple of quantile levels in (0,1)
     returns: [..., Q]
     """
-    *lead, T = sorted_vals.shape
-    ranks = torch.arange(T, device=sorted_vals.device, dtype=sorted_vals.dtype)
-    targets = levels * (T - 1)
-    diff = ranks[None, :] - targets[:, None]  # [Q, T]
-    w = torch.exp(-0.5 * (diff / max(sigma, 1e-6)) ** 2)
-    w = w / w.sum(dim=1, keepdim=True).clamp_min(1e-6)
-    s_flat = sorted_vals.reshape(-1, T)  # [L, T]
-    q = (w @ s_flat.T).T  # [L, Q]
-    return q.reshape(*lead, -1)
+    device = hist.device
+    cdf = hist.cumsum(dim=-1)
+    q_tensor = torch.tensor(qs, device=device, dtype=hist.dtype)
+    thresh = q_tensor.view(*(1 for _ in range(hist.dim() - 1)), -1)  # [..., Q]
+    # broadcast compare cdf[..., None, :] >= qs, then find first True along bins
+    cmp = (cdf.unsqueeze(-2) >= thresh.unsqueeze(-1)).float()  # [..., Q, B]
+    idx = cmp.argmax(dim=-1).clamp_max(hist.size(-1) - 1)  # [..., Q]
+    return idx.to(hist.dtype) / float(hist.size(-1) - 1 + 1e-12)
 
 
-def _softsort_quantiles(values_bnkt: torch.Tensor, levels: torch.Tensor, reg_c: float, reg_alpha: float):
+def robust_legendre_coeff(v_bnkt: torch.Tensor, B: torch.Tensor) -> torch.Tensor:
+    """One-step reweighted least squares for robust Legendre trend.
+
+    v_bnkt: [B,N,K,T]
+    B: [P+1, T]
+    returns: [B,N,K,P+1]
     """
-    Differentiable quantiles via SoftSort.
-    values_bnkt: [B, N, K, T] (unsorted)
-    levels: [Q] in (0,1)
-    reg_c, reg_alpha: regularization strength = max(1e-3, reg_c * T^{-reg_alpha})
-    Returns: qv [B, N, K, Q]
-    """
-    B, N, K, T = values_bnkt.shape
-    L = B * N * K
-    vals = values_bnkt.contiguous().view(L, T)
-    reg = max(1e-3, float(reg_c) * (float(T) ** (-float(reg_alpha))))
-    # Soft sort along axis 1 (second axis for this API)
-    soft_sorted = soft_sort(vals, direction="ASCENDING", regularization_strength=reg)  # [L, T]
-    # Linear interpolation at fractional indices
-    device = soft_sorted.device
-    dtype = soft_sorted.dtype
-    pos = levels.to(device=device, dtype=dtype).clamp(0.0, 1.0) * (T - 1)
-    lo = pos.floor().long().clamp(0, T - 1)
-    hi = pos.ceil().long().clamp(0, T - 1)
-    w = (pos - lo.to(dtype)).unsqueeze(0)  # [1, Q]
-    idx_lo = lo.unsqueeze(0).expand(L, -1)  # [L, Q]
-    idx_hi = hi.unsqueeze(0).expand(L, -1)  # [L, Q]
-    gather_lo = torch.gather(soft_sorted, 1, idx_lo)
-    gather_hi = torch.gather(soft_sorted, 1, idx_hi)
-    qv = (1.0 - w) * gather_lo + w * gather_hi  # [L, Q]
-    return qv.view(B, N, K, -1)
+    # Initial coefficients by ordinary LS via projection
+    c0 = torch.einsum('pt,bnkt->bnkp', B, v_bnkt)
+    recon0 = torch.einsum('bnkp,pt->bnkt', c0, B)
+    r = v_bnkt - recon0
+    # Huber-like weights using MAD scale per series
+    delta = 1.0 * r.detach().abs().median(dim=-1, keepdim=True).values.clamp_min(1e-6)
+    abs_r = r.abs()
+    w = torch.where(abs_r <= delta, torch.ones_like(abs_r), (delta / abs_r).clamp_max(1.0))  # [B,N,K,T]
+    # Approximate by averaging weights over time for a single diagonal W
+    wt = w.mean(dim=-1, keepdim=True)  # [B,N,K,1]
+    BW = B.unsqueeze(0).unsqueeze(0).unsqueeze(0) * wt  # [B,N,K,P+1,T]
+    # Weighted normal equations per (B,N,K)
+    Bt = B.transpose(-1, -2)  # [T,P+1]
+    Gw = torch.einsum('bnkpt, tq->bnkpq', BW, Bt)  # [B,N,K,P+1,P+1]
+    rhs = torch.einsum('bnkpt, bnkt->bnkp', BW, v_bnkt)  # [B,N,K,P+1]
+    I = torch.eye(Gw.size(-1), device=Gw.device, dtype=Gw.dtype).view(1,1,1,Gw.size(-1),Gw.size(-1))
+    Gw_inv = torch.linalg.inv(Gw + 1e-4 * I)
+    c = torch.einsum('bnkpq,bnkp->bnkq', Gw_inv, rhs)
+    return c
 
 
-class SQuaReFuse(nn.Module):
-    """
-    Sliced-Quantile & Quadratic-trend Robust Fusion
+class SHiFTFuse(nn.Module):
+    """SHiFT-Fuse: Soft Histogram + robust Legendre Trend + Sparse Nonnegative Head.
+
     Input : x:[B,T,N,D], valid_mask:[B,T,N] (optional)
-    Output: h:[B,T,N,D], dict with 'r' (residual impact ratio)
-    K: num_dirs: int, 投影方向數
-    Q: quantiles: Tuple[float,...], 量化切片
-    P: poly_order: int, 多項式階數
+    Output: h:[B,T,N,D], dict with {'W': weight_matrix}
     """
 
     def __init__(
         self,
         d_model: int,
         num_dirs: int = 8,
-        quantiles: Tuple[float, ...] = (0.1, 0.5, 0.9),
-        poly_order: int = 2,
+        P: int = 2,
+        bins: int = 16,
+        qs: Tuple[float, ...] = (0.1, 0.5, 0.9),
+        head_width: int | None = None,  # kept for API parity but unused
         beta_init: float = 0.5,
         ortho_every_forward: bool = True,
-        head_width: int = 16,
-        softsort_c: float = 0.5,
-        softsort_alpha: float = 0.5,
+        hist_value_range: Tuple[float, float] = (-5.0, 5.0),
+        hist_sigma: float = 0.5,
     ):
         super().__init__()
         self.d_model = d_model
         self.K = int(num_dirs)
-        self.register_buffer("Q_levels", torch.tensor(quantiles, dtype=torch.float32), persistent=False)
-        self.P = int(poly_order)
-        self.ortho_every_forward = ortho_every_forward
-        self.softsort_c = float(softsort_c)
-        self.softsort_alpha = float(softsort_alpha)
+        self.P = int(P)
+        self.ortho_every_forward = bool(ortho_every_forward)
+        self.qs = tuple(float(q) for q in qs)
 
-        # Learn projection matrix (D -> K); we orthonormalize rows each forward
+        # Projection matrix
         self.proj = nn.Linear(d_model, self.K, bias=False)
         nn.init.kaiming_uniform_(self.proj.weight, a=5 ** 0.5)
 
-        feat_in = self.K * (len(quantiles) + (self.P + 1))
-        # Additive, per-feature head for interpretability
-        self.head = AdditiveHead(feat_in=feat_in, d_model=d_model, width=head_width, return_parts=True)
-        # Per-channel residual scale (vector gate). Shape: [D]
-        # Initialized to beta_init for all channels.
-        self.beta = nn.Parameter(torch.full((d_model,), float(beta_init), dtype=torch.float32))
+        # Soft histogram extractor
+        self.hist = SoftHistogram1D(bins=bins, value_range=hist_value_range, sigma=hist_sigma)
 
-        # Build feature name mapping for interpretability
-        q_names = [f"q{q:g}" for q in quantiles]
-        p_names = [f"p{p}" for p in range(self.P + 1)]
-        self._feat_names: List[str] = []
-        for k in range(self.K):
-            for name in q_names + p_names:
-                self._feat_names.append(f"{name}@dir{k}")
+        # Sparse Non-negative linear head
+        feat_in = self.K * (len(self.qs) + (self.P + 1) + 3)  # +3 for robust moments
+        self.head = SparseNonnegLinearHead(feat_in=feat_in, d_model=d_model)
+
+        # Residual gate per channel
+        self.beta = nn.Parameter(torch.full((d_model,), float(beta_init)))
 
     def _orthonormalize(self):
         with torch.no_grad():
@@ -282,11 +280,7 @@ class SQuaReFuse(nn.Module):
             Q, _ = torch.linalg.qr(W.t(), mode="reduced")  # [D, K]
             self.proj.weight.data.copy_(Q.t())
 
-    def forward(
-        self,
-        x: torch.Tensor,  # [B,T,N,D]
-        valid_mask: Optional[torch.Tensor] = None
-    ):
+    def forward(self, x: torch.Tensor, valid_mask: Optional[torch.Tensor] = None):
         B, T, N, D = x.shape
         device, dtype = x.device, x.dtype
         if valid_mask is None:
@@ -295,58 +289,38 @@ class SQuaReFuse(nn.Module):
         if self.ortho_every_forward:
             self._orthonormalize()
 
-        # 1) Project to K directions: v = x @ U (U:[D,K]) => [B,T,N,K]
+        # Project to K directions
         U = self.proj.weight.t()  # [D,K]
-        v = torch.einsum("btnd,dk->btnk", x, U)  # [B,T,N,K]
+        v = torch.einsum('btnd,dk->btnk', x, U)  # [B,T,N,K]
         v = v * valid_mask[..., None]
-
-        # 2) Differentiable quantiles along time using SoftSort
         v_bnkt = v.permute(0, 2, 3, 1).contiguous()  # [B,N,K,T]
-        levels = self.Q_levels.to(device=device, dtype=dtype)
-        qv = _softsort_quantiles(v_bnkt, levels=levels, reg_c=self.softsort_c, reg_alpha=self.softsort_alpha)  # [B,N,K,Q]
 
-        # 3) Legendre trend coefficients along time
+        # Soft histogram -> pseudo-quantiles
+        hist = self.hist(v_bnkt)  # [B,N,K,B]
+        q_idx = pseudo_quantiles_from_hist(hist, self.qs)  # [B,N,K,Q] in [0,1]
+
+        # Robust Legendre coefficients
         Bmat = _legendre_basis(T, self.P, device, dtype)  # [P+1, T]
-        coeff = torch.einsum("bnkt,pt->bnkp", v_bnkt, Bmat)  # [B,N,K,P+1]
+        coeff = robust_legendre_coeff(v_bnkt, Bmat)  # [B,N,K,P+1]
 
-        feats = torch.cat([qv, coeff], dim=-1).reshape(B, N, -1)  # [B,N, K*(Q+P+1)]
-        # Additive head returns per-feature parts for interpretability
-        y, parts = self.head(feats)  # y:[B,N,D], parts: List[F*[B,N,D]]
+        # Robust moments (Winsorized around median)
+        med = v_bnkt.detach().median(dim=-1, keepdim=True).values
+        r = torch.clamp(v_bnkt - med, -2.0, 2.0)
+        mean = r.mean(-1, keepdim=True)
+        var = r.var(-1, keepdim=True)
+        skew = ((r - mean).pow(3).mean(-1, keepdim=True) / (var.squeeze(-1) + 1e-6).pow(1.5)).clamp(-5, 5)
 
-        # Broadcast over time and residual fuse
+        feats = torch.cat([q_idx, coeff, mean, var, skew], dim=-1).reshape(B, N, -1)
+        y, W = self.head(feats)  # [B,N,D], [F,D]
+
+        beta = torch.sigmoid(self.beta)[None, None, None, :]  # [1,1,1,D]
         y_btnd = y[:, None, :, :].expand(B, T, N, D)
-        # Vector gate beta in [0,1] for interpretability
-        beta_eff = torch.sigmoid(self.beta)[None, None, None, :]  # [1,1,1,D]
-        h = x + beta_eff * y_btnd
+        h = x + beta * y_btnd
         h = valid_mask[..., None] * h + (1.0 - valid_mask[..., None]) * x
 
-        # Compute residual impact ratio r for logging (detach to avoid autograd overhead)
-        with torch.no_grad():
-            num = ((beta_eff * y_btnd).pow(2).sum(dim=-1).sqrt()).mean()
-            den = (x.pow(2).sum(dim=-1).sqrt()).mean().clamp_min(1e-9)
-            r = (num / den).detach()
-
-            # Per-feature contribution ratios
-            Fcnt = len(parts)
-            if Fcnt > 0:
-                parts_tensor = torch.stack(parts, dim=0)  # [F, B, N, D]
-                parts_bnDF = parts_tensor.permute(1, 2, 3, 0)  # [B, N, D, F]
-                parts_btndf = parts_bnDF[:, None, ...].expand(B, T, N, D, Fcnt)  # [B,T,N,D,F]
-                contrib = (beta_eff[..., None] * parts_btndf)  # [B,T,N,D,F]
-                energy = contrib.pow(2).sum(dim=(1, 2, 3)).sqrt()  # [B, F]
-                num_f = energy.mean(dim=0)  # [F]
-                den0 = (x.pow(2).sum(dim=-1).sqrt()).mean().clamp_min(1e-9)
-                r_feat = (num_f / den0).detach()  # [F]
-            else:
-                r_feat = torch.empty(0, device=x.device, dtype=torch.float32)
-
-        additional: Dict[str, torch.Tensor] = {
-            'r': r,
-            'r_feat': r_feat,
-        }
-        return h, additional
+        return h, { 'W': W }
 
 
 __all__ = [
-    'SQuaReFuse',
+    'SHiFTFuse',
 ]
