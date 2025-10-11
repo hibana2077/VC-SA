@@ -223,7 +223,8 @@ def robust_legendre_coeff(v_bnkt: torch.Tensor, B: torch.Tensor) -> torch.Tensor
     # Approximate by averaging weights over time for a single diagonal W
     wt = w.mean(dim=-1, keepdim=True)  # [B,N,K,1]
     # Expand wt to align with [B,N,K,P+1,T]: wt is [B,N,K,1] -> [B,N,K,1,1]
-    BW = B.unsqueeze(0).unsqueeze(0).unsqueeze(0) * wt.unsqueeze(-1).unsqueeze(-1)  # [B,N,K,P+1,T]
+    # Note: only a single unsqueeze is needed; an extra one would create a 6D tensor and break einsum
+    BW = B.unsqueeze(0).unsqueeze(0).unsqueeze(0) * wt.unsqueeze(-1)  # [B,N,K,P+1,T]
     # Weighted normal equations per (B,N,K)
     Bt = B.transpose(-1, -2)  # [T,P+1]
     Gw = torch.einsum('bnkpt, tq->bnkpq', BW, Bt)  # [B,N,K,P+1,P+1]
