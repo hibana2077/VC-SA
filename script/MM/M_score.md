@@ -49,11 +49,11 @@ python3 -c "import timm; timm.create_model('coat_lite_medium.in1k', pretrained=T
 | M004 | beitv2_base_patch16_224.in1k_ft_in22k_in1k | 0.6252 |
 | M005 | vit_large_patch14_clip_224.openai_ft_in1k | ? |
 | M006 | aimv2_large_patch14_224.apple_pt_dist | ? |
-| M007 | xcit_small_24_p8_224.fb_dist_in1k | ? |
+| M007 | xcit_small_24_p8_224.fb_dist_in1k | 0.5057 |
 | M008 | vit_base_patch16_siglip_224.v2_webli | ? |
-| M009 | beit3_large_patch16_224.indomain_in22k_ft_in1k | ? |
+| M009 | beit3_large_patch16_224.indomain_in22k_ft_in1k | 0.6624 |
 | M010 | xcit_large_24_p8_224.fb_dist_in1k | ? |
-| M011 | beitv2_large_patch16_224.in1k_ft_in22k | ? |
+| M011 | beitv2_large_patch16_224.in1k_ft_in22k | 0.6559 |
 | M012 | vit_tiny_patch16_224.augreg_in21k_ft_in1k | 0.5908 |
-| M015 | tnt_s_patch16_224.in1k | ? |
+| M015 | tnt_s_patch16_224.in1k | 0.3441 |
 | M016 | tnt_b_patch16_224.in1k | ? |
