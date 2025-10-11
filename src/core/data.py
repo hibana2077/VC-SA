@@ -21,6 +21,7 @@ from .data import (
     VideoDataModule,
     prepare_hmdb51_annotations,
     prepare_diving48_annotations,
+    prepare_ssv2_annotations,
     create_datamodule_for,
 )
 
@@ -32,5 +33,6 @@ __all__ = [
     "VideoDataModule",
     "prepare_hmdb51_annotations",
     "prepare_diving48_annotations",
+    "prepare_ssv2_annotations",
     "create_datamodule_for",
 ]

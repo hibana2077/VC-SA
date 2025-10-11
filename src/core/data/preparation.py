@@ -3,7 +3,8 @@
 """
 Dataset preparation utilities for fixed (built-in) datasets.
 
-Supports HMDB51 and Diving48 dataset preparation and annotation generation.
+Supports HMDB51, Diving48, and Something-Something V2 dataset preparation and
+annotation generation.
 """
 
 from __future__ import annotations
@@ -12,7 +13,7 @@ import csv
 import json
 import random
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Dict
 
 from .datamodule import VideoDataModule
 
@@ -175,6 +176,150 @@ def prepare_diving48_annotations(
     return out_paths
 
 
+def prepare_ssv2_annotations(
+    root_dir: str,
+    cache_dir: Optional[str] = None,
+    videos_subdir: str = "20bn-something-something-v2",
+    labels_subdir: str = "labels",
+) -> dict:
+    """Prepare CSV annotation files for Something-Something V2 dataset (SSV2).
+
+    Directory layout (no auto-download; follow docs/new_dataset.md):
+
+        root_dir/
+            20bn-something-something-v2/
+                1.webm, 10.webm, ...
+            labels/
+                labels.json
+                train.json
+                validation.json
+                test.json
+                test-answers.csv
+
+    Output CSVs are written to ``cache_dir`` and contain absolute video paths
+    and integer class ids, consumable by ``VideoCSVAnnotation``.
+
+    Args:
+        root_dir: SSV2 dataset root directory
+        cache_dir: Where to write generated CSVs & label mapping JSON
+        videos_subdir: Subfolder containing video files
+        labels_subdir: Subfolder containing label/annotation files
+
+    Returns:
+        dict with keys 'train','val','test' and 'label_mapping'
+    """
+    root = Path(root_dir)
+    vids_dir = root / videos_subdir
+    lbls_dir = root / labels_subdir
+    cache_path = _ensure_cache_dir(cache_dir)
+
+    # Load label mapping: class name -> id (string)
+    labels_json = lbls_dir / "labels.json"
+    if not labels_json.is_file():
+        raise FileNotFoundError(f"SSV2 labels.json not found: {labels_json}")
+    with labels_json.open("r", encoding="utf-8") as f:
+        name_to_id_str: Dict[str, str] = json.load(f)
+    # Normalize to int ids
+    name_to_id: Dict[str, int] = {k: int(v) for k, v in name_to_id_str.items()}
+
+    def _template_to_class_name(t: str) -> str:
+        # Convert templates like "Holding [something] next to [something]"
+        # to class names "Holding something next to something".
+        # Handle [Something] variant too.
+        return (
+            t.replace("[something]", "something")
+             .replace("[Something]", "something")
+             .strip()
+        )
+
+    def _write_split(json_file: Path, out_csv: Path):
+        with json_file.open("r", encoding="utf-8") as f:
+            items = json.load(f)
+        with out_csv.open("w", newline="", encoding="utf-8") as fcsv:
+            writer = csv.writer(fcsv)
+            for it in items:
+                vid_id = str(it.get("id"))
+                template = it.get("template")
+                if template is None:
+                    raise ValueError(f"Missing 'template' for item id={vid_id} in {json_file}")
+                class_name = _template_to_class_name(template)
+                if class_name not in name_to_id:
+                    # Sometimes labels.json already uses the template form without brackets,
+                    # but if there's a mismatch, provide a clear error.
+                    raise KeyError(
+                        f"Class name '{class_name}' not found in labels.json."
+                    )
+                cid = name_to_id[class_name]
+                video_path = (vids_dir / f"{vid_id}.webm").resolve()
+                writer.writerow([str(video_path), cid])
+
+    # Train/Val splits
+    train_json = lbls_dir / "train.json"
+    val_json = lbls_dir / "validation.json"
+    if not train_json.is_file() or not val_json.is_file():
+        raise FileNotFoundError(
+            f"SSV2 train/validation json not found: {train_json}, {val_json}"
+        )
+    out_train = cache_path / "ssv2_train.csv"
+    out_val = cache_path / "ssv2_val.csv"
+    _write_split(train_json, out_train)
+    _write_split(val_json, out_val)
+
+    # Test split requires mapping from id -> class name using test-answers.csv
+    test_json = lbls_dir / "test.json"
+    test_ans = lbls_dir / "test-answers.csv"
+    if not test_json.is_file():
+        raise FileNotFoundError(f"SSV2 test.json not found: {test_json}")
+    if not test_ans.is_file():
+        raise FileNotFoundError(
+            f"SSV2 test-answers.csv not found: {test_ans}. Please follow manual download steps."
+        )
+    # Build answers map (format: id;Class Name)
+    id_to_class: Dict[str, str] = {}
+    with test_ans.open("r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            if ";" not in line:
+                continue
+            vid_id, cls_name = line.split(";", 1)
+            id_to_class[vid_id.strip()] = cls_name.strip()
+
+    with test_json.open("r", encoding="utf-8") as f:
+        test_items = json.load(f)
+
+    out_test = cache_path / "ssv2_test.csv"
+    with out_test.open("w", newline="", encoding="utf-8") as fcsv:
+        writer = csv.writer(fcsv)
+        for it in test_items:
+            vid_id = str(it.get("id"))
+            cls_name = id_to_class.get(vid_id)
+            if cls_name is None:
+                raise KeyError(
+                    f"No test answer found for id={vid_id} in {test_ans}."
+                )
+            if cls_name not in name_to_id:
+                raise KeyError(
+                    f"Test class name '{cls_name}' not found in labels.json."
+                )
+            cid = name_to_id[cls_name]
+            video_path = (vids_dir / f"{vid_id}.webm").resolve()
+            writer.writerow([str(video_path), cid])
+
+    # Save mapping for reference
+    mapping_file = cache_path / "ssv2_label_mapping.json"
+    with mapping_file.open("w", encoding="utf-8") as f:
+        json.dump({"label_to_id": name_to_id}, f, ensure_ascii=False, indent=2)
+
+    return {
+        "train": str(out_train),
+        "val": str(out_val),
+        "test": str(out_test),
+        "label_mapping": str(mapping_file),
+    }
+
+
 def create_datamodule_for(
     dataset: str,
     root_dir: str,
@@ -193,8 +338,9 @@ def create_datamodule_for(
     """Factory helper to create a ``VideoDataModule`` for built-in datasets.
 
     Supported dataset identifiers (case-insensitive):
-        - 'hmdb51'
-        - 'diving48', 'div48'
+    - 'hmdb51'
+    - 'diving48', 'div48'
+    - 'ssv2', 'something-something-v2'
 
     For HMDB51, only ``root_dir`` (dataset root) is required.
     For Diving48, either provide explicit JSON label file paths or rely on
@@ -247,11 +393,28 @@ def create_datamodule_for(
         )
         return dm
 
+    if ds in {"ssv2", "something-something-v2", "something_something_v2"}:
+        annos = prepare_ssv2_annotations(root_dir, cache_dir=cache_dir)
+        dm = VideoDataModule(
+            data_root=root_dir,
+            train_csv=annos["train"],
+            val_csv=annos["val"],
+            test_csv=annos["test"],
+            frames_per_clip=frames_per_clip,
+            batch_size=batch_size,
+            num_workers=num_workers,
+            frame_cache_dir=frame_cache_dir,
+            resize=resize,
+            use_test_as_val=use_test_as_val,
+        )
+        return dm
+
     raise ValueError(f"Unsupported dataset: {dataset}. Supported: hmdb51, diving48")
 
 
 __all__ = [
     "prepare_hmdb51_annotations",
     "prepare_diving48_annotations",
+    "prepare_ssv2_annotations",
     "create_datamodule_for",
 ]

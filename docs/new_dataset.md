@@ -114,3 +114,92 @@ rgb/
     ...
 ]
 ```
+
+## Something-Something V2 Dataset
+
+### Download the dataset
+
+Using download script from [here](../download/ssv2.bash)
+
+```bash
+mkdir -p ./datasets/ssv2
+cp download/ssv2.bash ./datasets/ssv2/
+cd ./datasets/ssv2
+bash ssv2.bash
+```
+
+### Dataset Structure
+
+```
+ssv2/
+├── 20bn-something-something-v2/
+│   ├── 1.webm
+│   ├── 10.webm
+│   └── ...
+├── labels/
+│   ├── labels.json
+│   ├── train.json
+│   ├── validation.json
+│   ├── test.json
+│   └── test-answers.csv
+```
+
+### Label Format
+
+#### labels/labels.json
+
+```json
+{
+ "Approaching something with your camera":"0",
+ "Attaching something to something":"1",
+ "Bending something so that it deforms":"2",
+...
+  "Wiping something off of something":"174"
+}
+```
+
+#### labels/train.json
+
+```json
+[
+{"id":"78687","label":"holding potato next to vicks vaporub bottle","template":"Holding [something] next to [something]","placeholders":["potato","vicks vaporub bottle"]},
+{"id":"42326","label":"spreading margarine onto bread","template":"Spreading [something] onto [something]","placeholders":["margarine","bread"]},
+...
+{"id":"145274","label":"moving ladle away from hot pack","template":"Moving [something] away from [something]","placeholders":["ladle","hot pack"]},
+{"id":"131791","label":"pretending to put vessel onto poori maker","template":"Pretending to put [something] onto [something]","placeholders":["vessel","poori maker"]}
+]
+```
+
+#### labels/validation.json
+
+```json
+[
+{"id":"74225","label":"spinning cube that quickly stops spinning","template":"Spinning [something] that quickly stops spinning","placeholders":["cube"]},
+{"id":"116154","label":"showing clay box on top of wallet","template":"Showing [something] on top of [something]","placeholders":["clay box","wallet"]},
+...
+{"id":"117478","label":"moving glass up","template":"Moving [something] up","placeholders":["glass"]},
+{"id":"36585","label":"plastic falling like a feather or paper","template":"[Something] falling like a feather or paper","placeholders":["plastic"]}
+]
+```
+
+#### labels/test.json
+
+```json
+[
+{"id":"1420"},
+{"id":"166429"},
+...
+{"id":"211642"},
+{"id":"215493"}
+]
+```
+
+#### labels/test-answers.csv
+
+```csv
+1420;Throwing something
+50058;Stacking number of something
+...
+211642;Scooping something up with something
+215493;Pretending to poke something
+```
