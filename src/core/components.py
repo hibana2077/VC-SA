@@ -267,7 +267,6 @@ class SQuaReFuse(nn.Module):
         # Per-channel residual scale (vector gate). Shape: [D]
         # Initialized to beta_init for all channels.
         self.beta = nn.Parameter(torch.full((d_model,), float(beta_init), dtype=torch.float32))
-        self._mem_state: Dict[str, torch.Tensor] = {}
 
         # Build feature name mapping for interpretability
         q_names = [f"q{q:g}" for q in quantiles]
@@ -341,13 +340,11 @@ class SQuaReFuse(nn.Module):
             else:
                 r_feat = torch.empty(0, device=x.device, dtype=torch.float32)
 
-        mem: Dict[str, torch.Tensor] = {
+        additional: Dict[str, torch.Tensor] = {
             'r': r,
             'r_feat': r_feat,
         }
-        # Store ephemeral state if needed later (kept empty for now)
-        self._mem_state = {}
-        return h, mem
+        return h, additional
 
 
 __all__ = [
