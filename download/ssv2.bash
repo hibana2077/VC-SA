@@ -35,8 +35,8 @@ download_segments() {
         SEGMENT_NAME="${SEGMENT_PREFIX}-${i}"
         DOWNLOAD_URL="${BASE_URL}/${SEGMENT_NAME}"
         echo -e "${C_YELLOW} -> Downloading ${SEGMENT_NAME}...${C_NONE}"
-        # -L: follow redirects, -O: save with remote filename, -sS: silent but show errors
-        curl -L -O -sS "${DOWNLOAD_URL}"
+        # -L: follow redirects, -O: save with remote filename, --progress-bar: show progress bar
+        curl -L -O --progress-bar "${DOWNLOAD_URL}"
     done
     echo -e "${C_GREEN}✔ All segments downloaded.${C_NONE}"
 }
@@ -58,7 +58,7 @@ extract_segments() {
 download_labels() {
     print_header "3. Downloading and extracting label/annotation files"
     echo -e "${C_YELLOW} -> Downloading label file...${C_NONE}"
-    curl -L -o "${LABEL_ZIP}" -sS "${LABEL_URL}"
+    curl -L -o "${LABEL_ZIP}" --progress-bar "${LABEL_URL}"
     echo -e "${C_GREEN}✔ Label file downloaded.${C_NONE}"
 
     echo -e "${C_YELLOW} -> Extracting label file...${C_NONE}"
