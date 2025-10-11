@@ -19,7 +19,7 @@ python3 -c "import timm; timm.create_model('coat_lite_medium.in1k', pretrained=T
 - tnt_s_patch16_224.in1k
 - tnt_b_patch16_224.in1k
 
-## Summary of Test Accuracies
+## Summary of Test Accuracies(Old)
 
 | Code | Model Name | Test Acc |
 |------|------------|----------|
@@ -37,3 +37,8 @@ python3 -c "import timm; timm.create_model('coat_lite_medium.in1k', pretrained=T
 | M012 | vit_tiny_patch16_224.augreg_in21k_ft_in1k | 0.6152 |
 | M015 | tnt_s_patch16_224.in1k | 0.6445 |
 | M016 | tnt_b_patch16_224.in1k | 0.6896 |
+
+## New version Results
+
+| Code | Model Name | Test Acc |
+|------|------------|----------|

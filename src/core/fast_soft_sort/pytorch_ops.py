@@ -31,13 +31,30 @@ def wrap_class(cls, **kwargs):
 
     @staticmethod
     def forward(ctx, values):
-      obj = cls(values.detach().numpy(), **kwargs)
+      # Preserve original device and dtype
+      device = values.device
+      dtype = values.dtype
+
+      # Move to CPU for NumPy-based ops
+      np_values = values.detach().cpu().numpy()
+      obj = cls(np_values, **kwargs)
       ctx.numpy_obj = obj
-      return torch.from_numpy(obj.compute())
+      # Compute and move result back to original device/dtype
+      out = torch.from_numpy(obj.compute())
+      if out.dtype != dtype:
+        out = out.to(dtype)
+      return out.to(device)
 
     @staticmethod
     def backward(ctx, grad_output):
-      return torch.from_numpy(ctx.numpy_obj.vjp(grad_output.numpy()))
+      # Compute VJP in NumPy, ensuring gradient is on CPU
+      np_grad = grad_output.detach().cpu().numpy()
+      np_vjp = ctx.numpy_obj.vjp(np_grad)
+      grad_input = torch.from_numpy(np_vjp)
+      # Match the original gradient's dtype/device
+      if grad_input.dtype != grad_output.dtype:
+        grad_input = grad_input.to(grad_output.dtype)
+      return grad_input.to(grad_output.device)
 
   return NumpyOpWrapper
 
