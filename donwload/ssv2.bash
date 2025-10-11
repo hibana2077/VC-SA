@@ -25,9 +25,14 @@ done
 #    This command concatenates all segments and pipes to tar for extraction
 echo "Combining and extracting ..."
 cat 20bn-something-something-v2-* | tar zx
+#    Optionally, remove the segment files after extraction
+rm 20bn-something-something-v2-00
+rm 20bn-something-something-v2-01
 
 # 6. Download labels / annotations
 echo "Downloading labels / annotations ..."
 curl -L -O https://softwarecenter.qualcomm.com/api/download/software/dataset/AIDataset/Something-Something-V2/20bn-something-something-download-package-labels.zip
+unzip 20bn-something-something-download-package-labels.zip
+rm 20bn-something-something-download-package-labels.zip
 
 # (Place the downloaded JSON into your intended annotation directory)
