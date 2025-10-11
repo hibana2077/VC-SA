@@ -310,7 +310,11 @@ class SHiFTFuse(nn.Module):
         r = torch.clamp(v_bnkt - med, -2.0, 2.0)
         mean = r.mean(-1, keepdim=True)
         var = r.var(-1, keepdim=True)
-        skew = ((r - mean).pow(3).mean(-1, keepdim=True) / (var.squeeze(-1) + 1e-6).pow(1.5)).clamp(-5, 5)
+        # Keep denominator shape as [B,N,K,1] to align with numerator and avoid broadcasting mismatches
+        skew = (
+            (r - mean).pow(3).mean(-1, keepdim=True)
+            / (var + 1e-6).pow(1.5)
+        ).clamp(-5, 5)
 
         feats = torch.cat([q_idx, coeff, mean, var, skew], dim=-1).reshape(B, N, -1)
         y, W = self.head(feats)  # [B,N,D], [F,D]
