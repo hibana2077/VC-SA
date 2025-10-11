@@ -22,9 +22,7 @@ import lightning as L
 from pathlib import Path
 import sys
 
-from .components import (
-    BDRFuse,
-)
+from .frida import FRIDA
 
 
 class ViTTokenBackbone(nn.Module):
@@ -144,12 +142,13 @@ class GraphSamplerActionModel(L.LightningModule):
         use_gat: bool = True,
         label_smoothing: float = 0.0,
         test_each_epoch: bool = True,
-    # BDRF hyperparameters
-    bdrf_num_dirs: int = 8,
-    bdrf_poly_order: int = 2,
-    bdrf_beta: float = 0.5,
-    bdrf_ortho: bool = True,
-    bdrf_bound_scale: float = 2.5,
+    # FRIDA hyperparameters
+    frida_num_dirs: int = 8,
+    frida_scales: Tuple[int, ...] = (1, 2, 4),
+    frida_use_rms: bool = True,
+    frida_beta: float = 0.5,
+    frida_ortho: bool = True,
+    frida_bound_scale: float = 2.5,
     ):
         super().__init__()
         self.save_hyperparameters()
@@ -164,14 +163,15 @@ class GraphSamplerActionModel(L.LightningModule):
         # Probe backbone to get dimensions
         d_model, n_tokens = self._probe_backbone_dims()
         # Selection removed; frame_topk/token_topk kept for CLI backward-compat but unused
-        # Replace previous fuse layer with BDRF
-        self.fusion = BDRFuse(
+        # Replace fusion layer with FRIDA
+        self.fusion = FRIDA(
             d_model=d_model,
-            num_dirs=bdrf_num_dirs,
-            P=bdrf_poly_order,
-            beta_init=bdrf_beta,
-            ortho_every_forward=bdrf_ortho,
-            bound_scale=bdrf_bound_scale,
+            num_dirs=frida_num_dirs,
+            scales=tuple(frida_scales),
+            use_rms=frida_use_rms,
+            ortho_every_forward=frida_ortho,
+            bound_scale=frida_bound_scale,
+            beta_init=frida_beta,
         )
         
         # Classification head
@@ -276,7 +276,7 @@ class GraphSamplerActionModel(L.LightningModule):
         loss = self.criterion(logits, label)
         acc = (logits.argmax(dim=-1) == label).float().mean()
 
-    # No BDRF-specific logs beyond beta stats (optional)
+    # No FRIDA-specific logs beyond beta stats (optional)
         
         self.log('train/loss', loss, prog_bar=True, on_step=True, on_epoch=True)
         self.log('train/acc', acc, prog_bar=True, on_step=True, on_epoch=True)
@@ -334,7 +334,7 @@ class GraphSamplerActionModel(L.LightningModule):
         Optionally runs test evaluation without invoking Trainer.test
         to avoid nested training loops.
         """
-        # Log beta vector statistics from BDRF for EpochSummary reporting
+        # Log beta vector statistics from FRIDA for EpochSummary reporting
         try:
             b = self.fusion.beta.detach().float().cpu()
             mean = b.mean().item()
@@ -343,13 +343,13 @@ class GraphSamplerActionModel(L.LightningModule):
             neff = (b.sum() ** 2 / (b.pow(2).sum().clamp_min(1e-9))).item()
             neff_ratio = neff / float(b.numel())
             # Emit metrics
-            self.log('bdrf/beta/mean', mean, on_epoch=True, prog_bar=False)
-            self.log('bdrf/beta/mean_abs', mean_abs, on_epoch=True, prog_bar=False)
-            self.log('bdrf/beta/median', med, on_epoch=True, prog_bar=False)
-            self.log('bdrf/beta/p10', p10, on_epoch=True, prog_bar=False)
-            self.log('bdrf/beta/p90', p90, on_epoch=True, prog_bar=False)
-            self.log('bdrf/beta/neff', neff, on_epoch=True, prog_bar=False)
-            self.log('bdrf/beta/neff_ratio', neff_ratio, on_epoch=True, prog_bar=False)
+            self.log('frida/beta/mean', mean, on_epoch=True, prog_bar=False)
+            self.log('frida/beta/mean_abs', mean_abs, on_epoch=True, prog_bar=False)
+            self.log('frida/beta/median', med, on_epoch=True, prog_bar=False)
+            self.log('frida/beta/p10', p10, on_epoch=True, prog_bar=False)
+            self.log('frida/beta/p90', p90, on_epoch=True, prog_bar=False)
+            self.log('frida/beta/neff', neff, on_epoch=True, prog_bar=False)
+            self.log('frida/beta/neff_ratio', neff_ratio, on_epoch=True, prog_bar=False)
         except Exception:
             pass
 
@@ -394,12 +394,12 @@ class GraphSamplerActionModel(L.LightningModule):
             p10, med, p90 = torch.quantile(b, torch.tensor([0.1, 0.5, 0.9])).tolist()
             neff = (b.sum() ** 2 / (b.pow(2).sum().clamp_min(1e-9))).item()
             neff_ratio = neff / float(b.numel())
-            self.log('bdrf/beta/mean', mean, on_epoch=True, prog_bar=False)
-            self.log('bdrf/beta/mean_abs', mean_abs, on_epoch=True, prog_bar=False)
-            self.log('bdrf/beta/median', med, on_epoch=True, prog_bar=False)
-            self.log('bdrf/beta/p10', p10, on_epoch=True, prog_bar=False)
-            self.log('bdrf/beta/p90', p90, on_epoch=True, prog_bar=False)
-            self.log('bdrf/beta/neff', neff, on_epoch=True, prog_bar=False)
-            self.log('bdrf/beta/neff_ratio', neff_ratio, on_epoch=True, prog_bar=False)
+            self.log('frida/beta/mean', mean, on_epoch=True, prog_bar=False)
+            self.log('frida/beta/mean_abs', mean_abs, on_epoch=True, prog_bar=False)
+            self.log('frida/beta/median', med, on_epoch=True, prog_bar=False)
+            self.log('frida/beta/p10', p10, on_epoch=True, prog_bar=False)
+            self.log('frida/beta/p90', p90, on_epoch=True, prog_bar=False)
+            self.log('frida/beta/neff', neff, on_epoch=True, prog_bar=False)
+            self.log('frida/beta/neff_ratio', neff_ratio, on_epoch=True, prog_bar=False)
         except Exception:
             pass

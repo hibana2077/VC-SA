@@ -300,23 +300,32 @@ def parse_args() -> argparse.Namespace:
         help='Distributed training strategy (auto, ddp, ddp_spawn, etc.)'
     )
     
-    # ===== Temporal Fusion (BDRF) =====
-    b_group = p.add_argument_group('Temporal Fusion (BDRF)')
-    b_group.add_argument('--bdrf-num-dirs', type=int, default=8, help='Number of projection directions K')
-    b_group.add_argument('--bdrf-poly-order', type=int, default=2, help='DCT low-frequency order P')
-    b_group.add_argument('--bdrf-beta', type=float, default=0.5, help='Initial residual gate beta')
-    b_group.add_argument('--bdrf-ortho', action='store_true', default=True, help='Orthonormalize projection each forward')
-    b_group.add_argument('--no-bdrf-ortho', dest='bdrf_ortho', action='store_false', help='Disable orthonormalization')
-    b_group.add_argument('--bdrf-bound-scale', type=float, default=2.5, help='Scale of tanh bounding after RMS normalization')
+    # ===== Temporal Fusion (FRIDA) =====
+    b_group = p.add_argument_group('Temporal Fusion (FRIDA)')
+    b_group.add_argument('--frida-num-dirs', type=int, default=8, help='Number of projection directions K')
+    b_group.add_argument('--frida-scales', type=int, nargs='+', default=[1, 2, 4], help='Difference spans r for multiscale features')
+    b_group.add_argument('--frida-use-rms', action='store_true', default=True, help='Use RMS magnitude; otherwise L1 when disabled')
+    b_group.add_argument('--no-frida-use-rms', dest='frida_use_rms', action='store_false', help='Use L1 magnitude instead of RMS')
+    b_group.add_argument('--frida-beta', type=float, default=0.5, help='Initial residual gate beta')
+    b_group.add_argument('--frida-ortho', action='store_true', default=True, help='Orthonormalize projection each forward')
+    b_group.add_argument('--no-frida-ortho', dest='frida_ortho', action='store_false', help='Disable orthonormalization')
+    b_group.add_argument('--frida-bound-scale', type=float, default=2.5, help='Scale of tanh bounding after RMS normalization')
 
-    # Backward-compat aliases (deprecated)
-    # These map old --square-* flags to new BDRF destinations
-    b_group.add_argument('--square-num-dirs', type=int, dest='bdrf_num_dirs', help='[deprecated] use --bdrf-num-dirs')
-    b_group.add_argument('--square-poly-order', type=int, dest='bdrf_poly_order', help='[deprecated] use --bdrf-poly-order')
-    b_group.add_argument('--square-beta', type=float, dest='bdrf_beta', help='[deprecated] use --bdrf-beta')
-    b_group.add_argument('--square-ortho', action='store_true', dest='bdrf_ortho', help='[deprecated] use --bdrf-ortho')
-    b_group.add_argument('--no-square-ortho', action='store_false', dest='bdrf_ortho', help='[deprecated] use --no-bdrf-ortho')
-    b_group.add_argument('--square-quantiles', type=float, nargs='+', help='[deprecated] quantiles unused in BDRF')
+    # Backward-compat aliases (deprecated BDRF flags -> FRIDA)
+    b_group.add_argument('--bdrf-num-dirs', type=int, help='[deprecated] use --frida-num-dirs')
+    b_group.add_argument('--bdrf-poly-order', type=int, help='[deprecated] replaced by --frida-scales')
+    b_group.add_argument('--bdrf-beta', type=float, help='[deprecated] use --frida-beta')
+    b_group.add_argument('--bdrf-ortho', dest='frida_ortho', action='store_true', help='[deprecated] use --frida-ortho')
+    b_group.add_argument('--no-bdrf-ortho', dest='frida_ortho', action='store_false', help='[deprecated] use --no-frida-ortho')
+    b_group.add_argument('--bdrf-bound-scale', type=float, help='[deprecated] use --frida-bound-scale')
+
+    # Backward-compat for older "square-*" flags -> map to FRIDA
+    b_group.add_argument('--square-num-dirs', type=int, dest='frida_num_dirs', help='[deprecated] use --frida-num-dirs')
+    b_group.add_argument('--square-poly-order', type=int, help='[deprecated] replaced by --frida-scales')
+    b_group.add_argument('--square-beta', type=float, dest='frida_beta', help='[deprecated] use --frida-beta')
+    b_group.add_argument('--square-ortho', action='store_true', dest='frida_ortho', help='[deprecated] use --frida-ortho')
+    b_group.add_argument('--no-square-ortho', action='store_false', dest='frida_ortho', help='[deprecated] use --no-frida-ortho')
+    b_group.add_argument('--square-quantiles', type=float, nargs='+', help='[deprecated] quantiles unused')
 
     args = p.parse_args()
 
@@ -334,14 +343,61 @@ def parse_args() -> argparse.Namespace:
         # If dataset chosen, CSV paths are auto-generated; ignore user-provided ones
         pass
 
-    # Warn if deprecated flags used and handle any special cases
-    if getattr(args, 'square_quantiles', None) is not None:
+    # Map deprecated BDRF flags into FRIDA flags; warn when present
+    if getattr(args, 'bdrf_num_dirs', None) is not None:
+        args.frida_num_dirs = args.bdrf_num_dirs
         try:
-            print('[warn] --square-quantiles is deprecated and ignored by BDRF.', flush=True)
+            print('[warn] --bdrf-num-dirs is deprecated; using --frida-num-dirs instead.', flush=True)
         except Exception:
             pass
-        # Drop attribute to avoid confusion
+        delattr(args, 'bdrf_num_dirs')
+    if getattr(args, 'bdrf_beta', None) is not None:
+        args.frida_beta = args.bdrf_beta
+        try:
+            print('[warn] --bdrf-beta is deprecated; using --frida-beta instead.', flush=True)
+        except Exception:
+            pass
+        delattr(args, 'bdrf_beta')
+    if getattr(args, 'bdrf_bound_scale', None) is not None:
+        args.frida_bound_scale = args.bdrf_bound_scale
+        try:
+            print('[warn] --bdrf-bound-scale is deprecated; using --frida-bound-scale instead.', flush=True)
+        except Exception:
+            pass
+        delattr(args, 'bdrf_bound_scale')
+    if getattr(args, 'bdrf_poly_order', None) is not None:
+        # Heuristic mapping: poly order P roughly maps to largest scale ~ 2^P
+        P = int(args.bdrf_poly_order)
+        mapped = [1]
+        # produce up to 3 scales similar to default
+        for r in [2, 4, 8, 16]:
+            if r <= max(2 ** max(P, 1), 16):
+                mapped.append(r)
+        args.frida_scales = mapped[:3]
+        try:
+            print(f"[warn] --bdrf-poly-order is deprecated; approximating with --frida-scales={args.frida_scales}.", flush=True)
+        except Exception:
+            pass
+        delattr(args, 'bdrf_poly_order')
+    # Older square_* flags
+    if getattr(args, 'square_quantiles', None) is not None:
+        try:
+            print('[warn] --square-quantiles is deprecated and ignored.', flush=True)
+        except Exception:
+            pass
         delattr(args, 'square_quantiles')
+    if getattr(args, 'square_poly_order', None) is not None:
+        P = int(args.square_poly_order)
+        mapped = [1]
+        for r in [2, 4, 8, 16]:
+            if r <= max(2 ** max(P, 1), 16):
+                mapped.append(r)
+        args.frida_scales = mapped[:3]
+        try:
+            print(f"[warn] --square-poly-order is deprecated; approximating with --frida-scales={args.frida_scales}.", flush=True)
+        except Exception:
+            pass
+        delattr(args, 'square_poly_order')
 
     return args
 
@@ -405,10 +461,11 @@ def get_default_config() -> dict:
         # Hardware
         'devices': 1,
         'strategy': 'auto',
-        # BDRF defaults
-        'bdrf_num_dirs': 8,
-        'bdrf_poly_order': 2,
-        'bdrf_beta': 0.5,
-        'bdrf_ortho': True,
-        'bdrf_bound_scale': 2.5,
+        # FRIDA defaults
+        'frida_num_dirs': 8,
+        'frida_scales': [1, 2, 4],
+        'frida_use_rms': True,
+        'frida_beta': 0.5,
+        'frida_ortho': True,
+        'frida_bound_scale': 2.5,
     }
