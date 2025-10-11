@@ -44,9 +44,23 @@ download_segments() {
 # 2. Merge and extract segment files
 extract_segments() {
     print_header "2. Merging and extracting segment files"
-    echo -e "${C_YELLOW} -> Merging all segments and extracting via 'tar'...${C_NONE}"
-    # Merge all segment files in order and pipe to tar for extraction
-    cat ${SEGMENT_PREFIX}-* | tar zx
+
+    # Check if pv (pipe viewer) is installed to show a progress bar
+    if ! command -v pv &> /dev/null; then
+        echo -e "${C_YELLOW} -> 'pv' not found. Merging and extracting without a progress bar.${C_NONE}"
+        echo -e "${C_YELLOW}    (To see progress, you can install 'pv'. e.g., 'sudo apt-get install pv' or 'brew install pv')${C_NONE}"
+        # Merge all segment files in order and pipe to tar for extraction
+        cat ${SEGMENT_PREFIX}-* | tar zx
+    else
+        echo -e "${C_YELLOW} -> Calculating total size for progress bar...${C_NONE}"
+        # Calculate the total size of all segment files for pv
+        total_size=$(du -cb ${SEGMENT_PREFIX}-* | grep total | awk '{print $1}')
+
+        echo -e "${C_YELLOW} -> Merging all segments and extracting via 'tar' with progress...${C_NONE}"
+        # Merge files, pipe through pv to show progress, then pipe to tar for extraction
+        cat ${SEGMENT_PREFIX}-* | pv -s $total_size | tar zx
+    fi
+
     echo -e "${C_GREEN}✔ Extraction completed.${C_NONE}"
 
     echo -e "${C_YELLOW} -> Deleting downloaded segment files...${C_NONE}"
