@@ -18,7 +18,7 @@ from typing import Optional, Tuple, Dict, List
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-# SoftSort no longer required for SHiFT-Fuse; keep module import list minimal
+# SoftSort no longer required for BDRF; keep module import list minimal
 
 
 def _topk_straight_through(logits: torch.Tensor, k: int, dim: int = -1, tau: float = 1.0):
@@ -130,156 +130,67 @@ class FrameTokenCoSelector(nn.Module):
 
 
 # -----------------------------
-# SQuaRe-Fuse (Sliced-Quantile & Quadratic-trend Robust Fusion)
+# BDRF (Bounded-DCT Residual Fusion)
 # -----------------------------
 
-
-class SparseNonnegLinearHead(nn.Module):
-        """A single linear layer with non-negative weights via softplus for interpretability.
-
-        Inputs:
-            - feats: [B, N, F]
-        Returns:
-            - y: [B, N, D]
-            - W: [F, D] effective non-negative weights
-        """
-        def __init__(self, feat_in: int, d_model: int):
-                super().__init__()
-                self.W_raw = nn.Parameter(torch.empty(feat_in, d_model))
-                nn.init.xavier_uniform_(self.W_raw)
-
-        def forward(self, feats: torch.Tensor):
-                W = F.softplus(self.W_raw)  # non-negative
-                y = feats @ W               # [B,N,D]
-                return y, W
-
-def _legendre_basis(T: int, order: int, device, dtype):
-    t = torch.linspace(-1.0, 1.0, T, device=device, dtype=dtype)
-    P = [torch.ones_like(t)]
-    if order >= 1:
-        P.append(t)
-    for n in range(1, order):
-        P.append(((2 * n + 1) * t * P[n] - n * P[n - 1]) / (n + 1))
-    B = torch.stack(P[: order + 1], dim=0)
-    B = B / (B.pow(2).sum(dim=1, keepdim=True).clamp_min(1e-6).sqrt())
-    return B  # [order+1, T]
+def _dct2_basis(T: int, P: int, device, dtype):
+    # DCT-II basis (approximate; normalized to avoid scale issues)
+    t = torch.arange(T, device=device, dtype=dtype) + 0.5  # [T]
+    B = [torch.ones(T, device=device, dtype=dtype)]  # p=0 constant term
+    for p in range(1, P + 1):
+        B.append(torch.cos(torch.pi * p * t / T))
+    B = torch.stack(B, dim=0)  # [P+1, T]
+    B = B / (B.square().sum(dim=1, keepdim=True).sqrt() + 1e-6)
+    return B
 
 
-class SoftHistogram1D(nn.Module):
-    """Soft histogram pooling layer along time for each projected series.
-
-    Produces a differentiable histogram with Gaussian kernel assignments.
-    """
-    def __init__(self, bins: int = 16, value_range: Tuple[float, float] = (-5.0, 5.0), sigma: float = 0.5):
+class NonnegLinear(nn.Module):
+    """Single-layer non-negative linear head for interpretability."""
+    def __init__(self, fin: int, fout: int):
         super().__init__()
-        self.bins = int(bins)
-        edges = torch.linspace(float(value_range[0]), float(value_range[1]), self.bins)
-        self.register_buffer('centers', edges, persistent=False)
-        self.sigma = float(sigma)
+        self.W_raw = nn.Parameter(torch.empty(fin, fout))
+        nn.init.xavier_uniform_(self.W_raw)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # x: [B,N,K,T]
-        x = x.unsqueeze(-1)  # [B,N,K,T,1]
-        dist2 = (x - self.centers) ** 2  # [B,N,K,T,B]
-        w = torch.exp(-0.5 * dist2 / (self.sigma ** 2 + 1e-12))
-        hist = w.sum(dim=-2) + 1e-8  # sum over T -> [B,N,K,B]
-        hist = hist / hist.sum(dim=-1, keepdim=True).clamp_min(1e-12)
-        return hist
+    def forward(self, x: torch.Tensor):
+        W = F.softplus(self.W_raw)
+        return x @ W, W
 
 
-def pseudo_quantiles_from_hist(hist: torch.Tensor, qs: Tuple[float, ...]) -> torch.Tensor:
-    """Extract approximate quantiles from a CDF built from a soft histogram.
-
-    Returns indices normalized to [0,1] with simple argmax; can be refined later.
-    hist: [..., B]
-    qs: tuple of quantile levels in (0,1)
-    returns: [..., Q]
+class BDRFuse(nn.Module):
     """
-    device = hist.device
-    cdf = hist.cumsum(dim=-1)
-    q_tensor = torch.tensor(qs, device=device, dtype=hist.dtype)
-    thresh = q_tensor.view(*(1 for _ in range(hist.dim() - 1)), -1)  # [..., Q]
-    # broadcast compare cdf[..., None, :] >= qs, then find first True along bins
-    cmp = (cdf.unsqueeze(-2) >= thresh.unsqueeze(-1)).float()  # [..., Q, B]
-    idx = cmp.argmax(dim=-1).clamp_max(hist.size(-1) - 1)  # [..., Q]
-    return idx.to(hist.dtype) / float(hist.size(-1) - 1 + 1e-12)
-
-
-def robust_legendre_coeff(v_bnkt: torch.Tensor, B: torch.Tensor) -> torch.Tensor:
-    """One-step reweighted least squares for robust Legendre trend.
-
-    v_bnkt: [B,N,K,T]
-    B: [P+1, T]
-    returns: [B,N,K,P+1]
-    """
-    # Initial coefficients by ordinary LS via projection
-    c0 = torch.einsum('pt,bnkt->bnkp', B, v_bnkt)
-    recon0 = torch.einsum('bnkp,pt->bnkt', c0, B)
-    r = v_bnkt - recon0
-    # Huber-like weights using MAD scale per series
-    delta = 1.0 * r.detach().abs().median(dim=-1, keepdim=True).values.clamp_min(1e-6)
-    abs_r = r.abs()
-    w = torch.where(abs_r <= delta, torch.ones_like(abs_r), (delta / abs_r).clamp_max(1.0))  # [B,N,K,T]
-    # Approximate by averaging weights over time for a single diagonal W
-    wt = w.mean(dim=-1, keepdim=True)  # [B,N,K,1]
-    # Expand wt to align with [B,N,K,P+1,T]: wt is [B,N,K,1] -> [B,N,K,1,1]
-    # Note: only a single unsqueeze is needed; an extra one would create a 6D tensor and break einsum
-    BW = B.unsqueeze(0).unsqueeze(0).unsqueeze(0) * wt.unsqueeze(-1)  # [B,N,K,P+1,T]
-    # Weighted normal equations per (B,N,K)
-    Bt = B.transpose(-1, -2)  # [T,P+1]
-    Gw = torch.einsum('bnkpt, tq->bnkpq', BW, Bt)  # [B,N,K,P+1,P+1]
-    rhs = torch.einsum('bnkpt, bnkt->bnkp', BW, v_bnkt)  # [B,N,K,P+1]
-    I = torch.eye(Gw.size(-1), device=Gw.device, dtype=Gw.dtype).view(1,1,1,Gw.size(-1),Gw.size(-1))
-    Gw_inv = torch.linalg.inv(Gw + 1e-4 * I)
-    c = torch.einsum('bnkpq,bnkp->bnkq', Gw_inv, rhs)
-    return c
-
-
-class SHiFTFuse(nn.Module):
-    """SHiFT-Fuse: Soft Histogram + robust Legendre Trend + Sparse Nonnegative Head.
-
+    BDRF: Bounded-DCT Residual Fusion
     Input : x:[B,T,N,D], valid_mask:[B,T,N] (optional)
-    Output: h:[B,T,N,D], dict with {'W': weight_matrix}
+    Output: h:[B,T,N,D], {'W': weight_matrix}
     """
-
     def __init__(
         self,
         d_model: int,
         num_dirs: int = 8,
         P: int = 2,
-        bins: int = 16,
-        qs: Tuple[float, ...] = (0.1, 0.5, 0.9),
-        head_width: int | None = None,  # kept for API parity but unused
         beta_init: float = 0.5,
         ortho_every_forward: bool = True,
-        hist_value_range: Tuple[float, float] = (-5.0, 5.0),
-        hist_sigma: float = 0.5,
+        bound_scale: float = 2.5,
     ):
         super().__init__()
         self.d_model = d_model
         self.K = int(num_dirs)
         self.P = int(P)
         self.ortho_every_forward = bool(ortho_every_forward)
-        self.qs = tuple(float(q) for q in qs)
+        self.bound_scale = float(bound_scale)
 
-        # Projection matrix
         self.proj = nn.Linear(d_model, self.K, bias=False)
         nn.init.kaiming_uniform_(self.proj.weight, a=5 ** 0.5)
 
-        # Soft histogram extractor
-        self.hist = SoftHistogram1D(bins=bins, value_range=hist_value_range, sigma=hist_sigma)
+        # features = K * [ DCT coeffs (P+1) + 2 bounded moments (mean, rms) ]
+        feat_in = self.K * ((self.P + 1) + 2)
+        self.head = NonnegLinear(fin=feat_in, fout=d_model)
 
-        # Sparse Non-negative linear head
-        feat_in = self.K * (len(self.qs) + (self.P + 1) + 3)  # +3 for robust moments
-        self.head = SparseNonnegLinearHead(feat_in=feat_in, d_model=d_model)
-
-        # Residual gate per channel
         self.beta = nn.Parameter(torch.full((d_model,), float(beta_init)))
 
     def _orthonormalize(self):
         with torch.no_grad():
             W = self.proj.weight.data  # [K, D]
-            Q, _ = torch.linalg.qr(W.t(), mode="reduced")  # [D, K]
+            Q, _ = torch.linalg.qr(W.t(), mode="reduced")
             self.proj.weight.data.copy_(Q.t())
 
     def forward(self, x: torch.Tensor, valid_mask: Optional[torch.Tensor] = None):
@@ -291,42 +202,35 @@ class SHiFTFuse(nn.Module):
         if self.ortho_every_forward:
             self._orthonormalize()
 
-        # Project to K directions
-        U = self.proj.weight.t()  # [D,K]
-        v = torch.einsum('btnd,dk->btnk', x, U)  # [B,T,N,K]
+        # 1) Projection to K directions
+        U = self.proj.weight.t()                      # [D,K]
+        v = torch.einsum('btnd,dk->btnk', x, U)       # [B,T,N,K]
         v = v * valid_mask[..., None]
-        v_bnkt = v.permute(0, 2, 3, 1).contiguous()  # [B,N,K,T]
+        v_bnkt = v.permute(0, 2, 3, 1).contiguous()   # [B,N,K,T]
 
-        # Soft histogram -> pseudo-quantiles
-        hist = self.hist(v_bnkt)  # [B,N,K,B]
-        q_idx = pseudo_quantiles_from_hist(hist, self.qs)  # [B,N,K,Q] in [0,1]
+        # 2) Bounded via tanh after RMS normalization (robust to outliers)
+        rms = torch.sqrt(v_bnkt.pow(2).mean(dim=-1, keepdim=True) + 1e-6)
+        v_bounded = self.bound_scale * torch.tanh(v_bnkt / (rms + 1e-6))  # [B,N,K,T]
 
-        # Robust Legendre coefficients
-        Bmat = _legendre_basis(T, self.P, device, dtype)  # [P+1, T]
-        coeff = robust_legendre_coeff(v_bnkt, Bmat)  # [B,N,K,P+1]
+        # 3) Low-order DCT coefficients as trend features
+        Bmat = _dct2_basis(T, self.P, device, dtype)                       # [P+1, T]
+        coeff = torch.einsum('bnkt,pt->bnkp', v_bounded, Bmat)             # [B,N,K,P+1]
 
-        # Robust moments (Winsorized around median)
-        med = v_bnkt.detach().median(dim=-1, keepdim=True).values
-        r = torch.clamp(v_bnkt - med, -2.0, 2.0)
-        mean = r.mean(-1, keepdim=True)
-        var = r.var(-1, keepdim=True)
-        # Keep denominator shape as [B,N,K,1] to align with numerator and avoid broadcasting mismatches
-        skew = (
-            (r - mean).pow(3).mean(-1, keepdim=True)
-            / (var + 1e-6).pow(1.5)
-        ).clamp(-5, 5)
+        # 4) Two bounded moments: mean and RMS
+        mean_feat = v_bounded.mean(dim=-1, keepdim=True)                   # [B,N,K,1]
+        rms_feat  = torch.sqrt(v_bounded.pow(2).mean(dim=-1, keepdim=True) + 1e-6)
 
-        feats = torch.cat([q_idx, coeff, mean, var, skew], dim=-1).reshape(B, N, -1)
-        y, W = self.head(feats)  # [B,N,D], [F,D]
+        feats = torch.cat([coeff, mean_feat, rms_feat], dim=-1).reshape(B, N, -1)  # [B,N,F]
+        y, W = self.head(feats)                                            # [B,N,D], [F,D]
 
-        beta = torch.sigmoid(self.beta)[None, None, None, :]  # [1,1,1,D]
+        # 5) Residual fusion with per-channel gate
+        beta = torch.sigmoid(self.beta)[None, None, None, :]               # [1,1,1,D]
         y_btnd = y[:, None, :, :].expand(B, T, N, D)
         h = x + beta * y_btnd
         h = valid_mask[..., None] * h + (1.0 - valid_mask[..., None]) * x
-
-        return h, { 'W': W }
+        return h, {'W': W}
 
 
 __all__ = [
-    'SHiFTFuse',
+    'BDRFuse',
 ]

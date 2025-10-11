@@ -117,9 +117,9 @@ class PeriodicPrinterCallback(L.Callback):
             'train/loss', 'loss', 'train_loss',
             'train/acc', 'val/acc', 'test/acc',
             'train/grad_norm_pre_clip', 'train/grad_norm_post_clip',
-            # SHiFT-Fuse metrics (beta stats)
-            'shift/beta/mean', 'shift/beta/mean_abs', 'shift/beta/median',
-            'shift/beta/p10', 'shift/beta/p90', 'shift/beta/neff', 'shift/beta/neff_ratio'
+            # BDRF metrics (beta stats)
+            'bdrf/beta/mean', 'bdrf/beta/mean_abs', 'bdrf/beta/median',
+            'bdrf/beta/p10', 'bdrf/beta/p90', 'bdrf/beta/neff', 'bdrf/beta/neff_ratio'
         ]:
             if key in metrics:
                 val = metrics[key]
@@ -153,10 +153,10 @@ class EpochSummaryPrinter(L.Callback):
             'val/acc', 'val/loss',
             'epoch_test/acc', 'epoch_test/loss',
             'test/acc', 'test/loss',
-            # SHiFT-Fuse metrics
-            'shift/beta/mean', 'shift/beta/mean_abs', 'shift/beta/median',
-            'shift/beta/p10', 'shift/beta/p90',
-            'shift/beta/neff', 'shift/beta/neff_ratio'
+            # BDRF metrics
+            'bdrf/beta/mean', 'bdrf/beta/mean_abs', 'bdrf/beta/median',
+            'bdrf/beta/p10', 'bdrf/beta/p90',
+            'bdrf/beta/neff', 'bdrf/beta/neff_ratio'
         ]
         self.extra_keys = extra_keys or []
 
@@ -332,11 +332,11 @@ def main():
         use_gat=not args.no_gat,
         label_smoothing=args.label_smoothing,
         test_each_epoch=args.test_each_epoch,
-        square_num_dirs=args.square_num_dirs,
-        square_quantiles=tuple(args.square_quantiles),
-        square_poly_order=args.square_poly_order,
-        square_beta=args.square_beta,
-        square_ortho=args.square_ortho,
+        bdrf_num_dirs=args.bdrf_num_dirs,
+        bdrf_poly_order=args.bdrf_poly_order,
+        bdrf_beta=args.bdrf_beta,
+        bdrf_ortho=args.bdrf_ortho,
+        bdrf_bound_scale=getattr(args, 'bdrf_bound_scale', 2.5),
     )
     
     # Setup trainer

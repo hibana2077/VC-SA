@@ -300,14 +300,23 @@ def parse_args() -> argparse.Namespace:
         help='Distributed training strategy (auto, ddp, ddp_spawn, etc.)'
     )
     
-    # ===== Temporal Fusion (SQuaRe-Fuse) =====
-    sq_group = p.add_argument_group('Temporal Fusion (SQuaRe-Fuse)')
-    sq_group.add_argument('--square-num-dirs', type=int, default=8, help='Number of projection directions K')
-    sq_group.add_argument('--square-quantiles', type=float, nargs='+', default=[0.1, 0.5, 0.9], help='Quantile levels (space separated)')
-    sq_group.add_argument('--square-poly-order', type=int, default=2, help='Legendre trend order (0..2)')
-    sq_group.add_argument('--square-beta', type=float, default=0.5, help='Initial residual scale beta')
-    sq_group.add_argument('--square-ortho', action='store_true', default=True, help='Orthonormalize projection each forward')
-    sq_group.add_argument('--no-square-ortho', dest='square_ortho', action='store_false', help='Disable orthonormalization')
+    # ===== Temporal Fusion (BDRF) =====
+    b_group = p.add_argument_group('Temporal Fusion (BDRF)')
+    b_group.add_argument('--bdrf-num-dirs', type=int, default=8, help='Number of projection directions K')
+    b_group.add_argument('--bdrf-poly-order', type=int, default=2, help='DCT low-frequency order P')
+    b_group.add_argument('--bdrf-beta', type=float, default=0.5, help='Initial residual gate beta')
+    b_group.add_argument('--bdrf-ortho', action='store_true', default=True, help='Orthonormalize projection each forward')
+    b_group.add_argument('--no-bdrf-ortho', dest='bdrf_ortho', action='store_false', help='Disable orthonormalization')
+    b_group.add_argument('--bdrf-bound-scale', type=float, default=2.5, help='Scale of tanh bounding after RMS normalization')
+
+    # Backward-compat aliases (deprecated)
+    # These map old --square-* flags to new BDRF destinations
+    b_group.add_argument('--square-num-dirs', type=int, dest='bdrf_num_dirs', help='[deprecated] use --bdrf-num-dirs')
+    b_group.add_argument('--square-poly-order', type=int, dest='bdrf_poly_order', help='[deprecated] use --bdrf-poly-order')
+    b_group.add_argument('--square-beta', type=float, dest='bdrf_beta', help='[deprecated] use --bdrf-beta')
+    b_group.add_argument('--square-ortho', action='store_true', dest='bdrf_ortho', help='[deprecated] use --bdrf-ortho')
+    b_group.add_argument('--no-square-ortho', action='store_false', dest='bdrf_ortho', help='[deprecated] use --no-bdrf-ortho')
+    b_group.add_argument('--square-quantiles', type=float, nargs='+', help='[deprecated] quantiles unused in BDRF')
 
     args = p.parse_args()
 
@@ -324,6 +333,15 @@ def parse_args() -> argparse.Namespace:
     else:
         # If dataset chosen, CSV paths are auto-generated; ignore user-provided ones
         pass
+
+    # Warn if deprecated flags used and handle any special cases
+    if getattr(args, 'square_quantiles', None) is not None:
+        try:
+            print('[warn] --square-quantiles is deprecated and ignored by BDRF.', flush=True)
+        except Exception:
+            pass
+        # Drop attribute to avoid confusion
+        delattr(args, 'square_quantiles')
 
     return args
 
@@ -387,10 +405,10 @@ def get_default_config() -> dict:
         # Hardware
         'devices': 1,
         'strategy': 'auto',
-        # SQuaRe-Fuse defaults
-        'square_num_dirs': 8,
-        'square_quantiles': [0.1, 0.5, 0.9],
-        'square_poly_order': 2,
-        'square_beta': 0.5,
-        'square_ortho': True,
+        # BDRF defaults
+        'bdrf_num_dirs': 8,
+        'bdrf_poly_order': 2,
+        'bdrf_beta': 0.5,
+        'bdrf_ortho': True,
+        'bdrf_bound_scale': 2.5,
     }
