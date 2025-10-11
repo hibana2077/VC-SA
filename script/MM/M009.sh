@@ -16,4 +16,4 @@ export HF_HOME="/scratch/rp06/sl5952/VC-SA/.cache"
 export HF_HUB_OFFLINE=1
 # beit3_large_patch16_224.indomain_in22k_ft_in1k
 cd ../..
-python3 -m src.run --dataset hmdb51 --data-root ./datasets/hmdb51 --freeze-backbone --vit-name beit3_large_patch16_224.indomain_in22k_ft_in1k --frames-per-clip 12 --square-num-dirs 10 --batch-size 2 --num-workers 4 --precision 32 --no-future-warning --no-user-warning --use-test-as-val --no-tqdm --print-interval 1000 >> M009.log 2>&1
+python3 -m src.run --dataset hmdb51 --data-root ./datasets/hmdb51 --freeze-backbone --vit-name beit3_large_patch16_224.indomain_in22k_ft_in1k --frames-per-clip 12 --bdrf-num-dirs 8 --batch-size 2 --num-workers 4 --precision 32 --no-future-warning --no-user-warning --use-test-as-val --no-tqdm --print-interval 1000 >> M009.log 2>&1
