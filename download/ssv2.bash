@@ -29,9 +29,9 @@ print_header() {
 
 # 1. Download all dataset segments
 download_segments() {
-    print_header "1. Starting download of dataset segments (20 total)"
-    # Use a loop to generate filenames from 00 to 19
-    for i in $(seq -f "%02g" 0 19); do
+    print_header "1. Starting download of dataset segments (2 total)"
+    # Use a loop to generate filenames from 00 to 01
+    for i in $(seq -f "%02g" 0 1); do
         SEGMENT_NAME="${SEGMENT_PREFIX}-${i}"
         DOWNLOAD_URL="${BASE_URL}/${SEGMENT_NAME}"
         echo -e "${C_YELLOW} -> Downloading ${SEGMENT_NAME}...${C_NONE}"
