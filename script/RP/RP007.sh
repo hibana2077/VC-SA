@@ -23,7 +23,7 @@ python3 -m src.run \
   --freeze-backbone \
   --vit-name deit3_base_patch16_224.fb_in22k_ft_in1k \
   --frames-per-clip 16 \
-  --frieren-num-dirs 32 \
+  --frieren-num-dirs 64 \
   --batch-size 2 \
   --num-workers 4 \
   --precision 32 \
@@ -32,4 +32,4 @@ python3 -m src.run \
   --use-test-as-val \
   --no-tqdm \
   --print-interval 1000 \
-  >> RP006.log 2>&1
+  >> RP007.log 2>&1
