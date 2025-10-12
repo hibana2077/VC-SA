@@ -133,7 +133,9 @@ class FrierenFuse(nn.Module):
         device, dtype = v.device, v.dtype
         Bmat = _legendre_basis(T, P, device, dtype)  # [P+1, T]
         mask = valid[..., None]  # [B,T,N,1]
-        denom = mask.sum(dim=1).clamp_min(1e-6)  # [B,N,1,1]
+        # Sum valid counts over time and keep dims for correct broadcasting over K and P+1
+        # Final shape should be [B, N, 1, 1] to divide trend coefficients [B, N, K, P+1]
+        denom = mask.sum(dim=1).clamp_min(1e-6)[..., None]  # [B,N,1,1]
         v_bnkt = v.permute(0, 2, 3, 1)  # [B,N,K,T]
         trend = torch.einsum("bnkt,pt->bnkp", v_bnkt, Bmat) / denom  # normalized coeffs
         v_masked = v * mask
