@@ -95,7 +95,7 @@ class SQuaReFuse(nn.Module):
         # Map concatenated stats back to D
         feat_in = self.K * (len(quantiles) + (self.P + 1))
         self.head = nn.Sequential(
-            nn.LayerNorm(feat_in),
+            nn.RMSNorm(feat_in),
             nn.Linear(feat_in, 4 * self.d_model),
             nn.GELU(),
             nn.Linear(4 * self.d_model, self.d_model),
