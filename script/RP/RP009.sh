@@ -32,4 +32,4 @@ python3 -m src.run \
   --use-test-as-val \
   --no-tqdm \
   --print-interval 1000 \
-  >> RP008.log 2>&1
+  >> RP009.log 2>&1
