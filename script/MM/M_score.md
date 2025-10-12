@@ -1,6 +1,6 @@
 # M_score
 
-python3 -c "import timm; timm.create_model('coat_lite_medium.in1k', pretrained=True)"
+python3 -c "import timm; timm.create_model('eva_giant_patch14_224.clip_ft_in1k', pretrained=True)"
 
 ## Backbone Model
 
