@@ -117,9 +117,8 @@ class PeriodicPrinterCallback(L.Callback):
             'train/loss', 'loss', 'train_loss',
             'train/acc', 'val/acc', 'test/acc',
             'train/grad_norm_pre_clip', 'train/grad_norm_post_clip',
-            # FRIDA metrics (beta stats)
-            'frida/beta/mean', 'frida/beta/mean_abs', 'frida/beta/median',
-            'frida/beta/p10', 'frida/beta/p90', 'frida/beta/neff', 'frida/beta/neff_ratio'
+            # FrierenFuse aux summaries
+            'frieren/U/mean', 'frieren/W/mean', 'frieren/scales/mean', 'frieren/feature_dim'
         ]:
             if key in metrics:
                 val = metrics[key]
@@ -153,10 +152,8 @@ class EpochSummaryPrinter(L.Callback):
             'val/acc', 'val/loss',
             'epoch_test/acc', 'epoch_test/loss',
             'test/acc', 'test/loss',
-            # FRIDA metrics
-            'frida/beta/mean', 'frida/beta/mean_abs', 'frida/beta/median',
-            'frida/beta/p10', 'frida/beta/p90',
-            'frida/beta/neff', 'frida/beta/neff_ratio'
+            # FrierenFuse aux summaries
+            'frieren/U/mean', 'frieren/W/mean', 'frieren/scales/mean', 'frieren/feature_dim'
         ]
         self.extra_keys = extra_keys or []
 
@@ -332,12 +329,14 @@ def main():
         use_gat=not args.no_gat,
         label_smoothing=args.label_smoothing,
         test_each_epoch=args.test_each_epoch,
-    frida_num_dirs=args.frida_num_dirs,
-    frida_scales=tuple(getattr(args, 'frida_scales', [1, 2, 4])),
-    frida_use_rms=getattr(args, 'frida_use_rms', True),
-    frida_beta=args.frida_beta,
-    frida_ortho=args.frida_ortho,
-    frida_bound_scale=getattr(args, 'frida_bound_scale', 2.5),
+    frieren_num_dirs=getattr(args, 'frieren_num_dirs', 8),
+    frieren_scales=tuple(getattr(args, 'frieren_scales', [1, 2, 4])),
+    frieren_include_second=getattr(args, 'frieren_include_second', True),
+    frieren_include_posneg=getattr(args, 'frieren_include_posneg', True),
+    frieren_poly_order=getattr(args, 'frieren_poly_order', 2),
+    frieren_beta=getattr(args, 'frieren_beta', 0.5),
+    frieren_ortho=getattr(args, 'frieren_ortho', True),
+    frieren_bound_scale=getattr(args, 'frieren_bound_scale', 2.5),
     )
     
     # Setup trainer

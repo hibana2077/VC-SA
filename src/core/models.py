@@ -22,7 +22,7 @@ import lightning as L
 from pathlib import Path
 import sys
 
-from .frida import FRIDA
+from .frieren_fuse import FrierenFuse
 
 
 class ViTTokenBackbone(nn.Module):
@@ -142,13 +142,15 @@ class GraphSamplerActionModel(L.LightningModule):
         use_gat: bool = True,
         label_smoothing: float = 0.0,
         test_each_epoch: bool = True,
-    # FRIDA hyperparameters
-    frida_num_dirs: int = 8,
-    frida_scales: Tuple[int, ...] = (1, 2, 4),
-    frida_use_rms: bool = True,
-    frida_beta: float = 0.5,
-    frida_ortho: bool = True,
-    frida_bound_scale: float = 2.5,
+    # FrierenFuse hyperparameters
+    frieren_num_dirs: int = 8,
+    frieren_scales: Tuple[int, ...] = (1, 2, 4),
+    frieren_include_second: bool = True,
+    frieren_include_posneg: bool = True,
+    frieren_poly_order: int = 2,
+    frieren_beta: float = 0.5,
+    frieren_ortho: bool = True,
+    frieren_bound_scale: float = 2.5,
     ):
         super().__init__()
         self.save_hyperparameters()
@@ -163,16 +165,19 @@ class GraphSamplerActionModel(L.LightningModule):
         # Probe backbone to get dimensions
         d_model, n_tokens = self._probe_backbone_dims()
         # Selection removed; frame_topk/token_topk kept for CLI backward-compat but unused
-        # Replace fusion layer with FRIDA
-        self.fusion = FRIDA(
+        # Replace fusion layer with FrierenFuse
+        self.fusion = FrierenFuse(
             d_model=d_model,
-            num_dirs=frida_num_dirs,
-            scales=tuple(frida_scales),
-            use_rms=frida_use_rms,
-            ortho_every_forward=frida_ortho,
-            bound_scale=frida_bound_scale,
-            beta_init=frida_beta,
+            num_dirs=frieren_num_dirs,
+            scales=tuple(frieren_scales),
+            include_second=frieren_include_second,
+            include_posneg=frieren_include_posneg,
+            poly_order=frieren_poly_order,
+            ortho_every_forward=frieren_ortho,
+            bound_scale=frieren_bound_scale,
+            beta_init=frieren_beta,
         )
+        self._last_fuse_aux = None  # to stash aux for logging
         
         # Classification head
         self.cls_head = nn.Sequential(
@@ -259,7 +264,9 @@ class GraphSamplerActionModel(L.LightningModule):
         tokens = tokens.view(B, T, N, D)
         
         # Temporal fusion directly on full token grid (no selection)
-        h, mem = self.fusion(tokens)
+        h, aux = self.fusion(tokens)
+        # Stash aux for logging
+        self._last_fuse_aux = aux
         
         # Global average pooling over time and tokens
         feat = h.mean(dim=(1, 2))  # [B, D]
@@ -276,7 +283,7 @@ class GraphSamplerActionModel(L.LightningModule):
         loss = self.criterion(logits, label)
         acc = (logits.argmax(dim=-1) == label).float().mean()
 
-    # No FRIDA-specific logs beyond beta stats (optional)
+    # No FrierenFuse-specific logs beyond aux summary
         
         self.log('train/loss', loss, prog_bar=True, on_step=True, on_epoch=True)
         self.log('train/acc', acc, prog_bar=True, on_step=True, on_epoch=True)
@@ -308,7 +315,7 @@ class GraphSamplerActionModel(L.LightningModule):
         loss = self.criterion(logits, label)
         acc = (logits.argmax(dim=-1) == label).float().mean()
 
-    # No BDRF-specific logs here
+    # No FrierenFuse-specific logs here
         
         self.log('val/loss', loss, prog_bar=True, on_epoch=True)
         self.log('val/acc', acc, prog_bar=True, on_epoch=True)
@@ -334,22 +341,23 @@ class GraphSamplerActionModel(L.LightningModule):
         Optionally runs test evaluation without invoking Trainer.test
         to avoid nested training loops.
         """
-        # Log beta vector statistics from FRIDA for EpochSummary reporting
+        # Log FrierenFuse aux summary: mean of U, W, scales, and feature_dim
         try:
-            b = self.fusion.beta.detach().float().cpu()
-            mean = b.mean().item()
-            mean_abs = b.abs().mean().item()
-            p10, med, p90 = torch.quantile(b, torch.tensor([0.1, 0.5, 0.9])).tolist()
-            neff = (b.sum() ** 2 / (b.pow(2).sum().clamp_min(1e-9))).item()
-            neff_ratio = neff / float(b.numel())
-            # Emit metrics
-            self.log('frida/beta/mean', mean, on_epoch=True, prog_bar=False)
-            self.log('frida/beta/mean_abs', mean_abs, on_epoch=True, prog_bar=False)
-            self.log('frida/beta/median', med, on_epoch=True, prog_bar=False)
-            self.log('frida/beta/p10', p10, on_epoch=True, prog_bar=False)
-            self.log('frida/beta/p90', p90, on_epoch=True, prog_bar=False)
-            self.log('frida/beta/neff', neff, on_epoch=True, prog_bar=False)
-            self.log('frida/beta/neff_ratio', neff_ratio, on_epoch=True, prog_bar=False)
+            aux = self._last_fuse_aux or {}
+            U = aux.get('U', None)
+            W = aux.get('W', None)
+            scales = aux.get('scales', None)
+            fdim = aux.get('feature_dim', None)
+            if U is not None:
+                self.log('frieren/U/mean', U.detach().float().mean().item(), on_epoch=True, prog_bar=False)
+            if W is not None:
+                self.log('frieren/W/mean', W.detach().float().mean().item(), on_epoch=True, prog_bar=False)
+            if scales is not None:
+                self.log('frieren/scales/mean', scales.detach().float().mean().item(), on_epoch=True, prog_bar=False)
+            if fdim is not None:
+                # feature_dim is scalar tensor; take mean for safety
+                val = fdim.detach().float().mean().item()
+                self.log('frieren/feature_dim', val, on_epoch=True, prog_bar=False)
         except Exception:
             pass
 
@@ -386,20 +394,21 @@ class GraphSamplerActionModel(L.LightningModule):
         self.train()
 
     def on_validation_epoch_end(self):
-        """Ensure beta is logged at validation epoch end as well for summary printing."""
+        """Log FrierenFuse aux summary at validation epoch end as well."""
         try:
-            b = self.fusion.beta.detach().float().cpu()
-            mean = b.mean().item()
-            mean_abs = b.abs().mean().item()
-            p10, med, p90 = torch.quantile(b, torch.tensor([0.1, 0.5, 0.9])).tolist()
-            neff = (b.sum() ** 2 / (b.pow(2).sum().clamp_min(1e-9))).item()
-            neff_ratio = neff / float(b.numel())
-            self.log('frida/beta/mean', mean, on_epoch=True, prog_bar=False)
-            self.log('frida/beta/mean_abs', mean_abs, on_epoch=True, prog_bar=False)
-            self.log('frida/beta/median', med, on_epoch=True, prog_bar=False)
-            self.log('frida/beta/p10', p10, on_epoch=True, prog_bar=False)
-            self.log('frida/beta/p90', p90, on_epoch=True, prog_bar=False)
-            self.log('frida/beta/neff', neff, on_epoch=True, prog_bar=False)
-            self.log('frida/beta/neff_ratio', neff_ratio, on_epoch=True, prog_bar=False)
+            aux = self._last_fuse_aux or {}
+            U = aux.get('U', None)
+            W = aux.get('W', None)
+            scales = aux.get('scales', None)
+            fdim = aux.get('feature_dim', None)
+            if U is not None:
+                self.log('frieren/U/mean', U.detach().float().mean().item(), on_epoch=True, prog_bar=False)
+            if W is not None:
+                self.log('frieren/W/mean', W.detach().float().mean().item(), on_epoch=True, prog_bar=False)
+            if scales is not None:
+                self.log('frieren/scales/mean', scales.detach().float().mean().item(), on_epoch=True, prog_bar=False)
+            if fdim is not None:
+                val = fdim.detach().float().mean().item()
+                self.log('frieren/feature_dim', val, on_epoch=True, prog_bar=False)
         except Exception:
             pass

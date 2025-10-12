@@ -300,32 +300,30 @@ def parse_args() -> argparse.Namespace:
         help='Distributed training strategy (auto, ddp, ddp_spawn, etc.)'
     )
     
-    # ===== Temporal Fusion (FRIDA) =====
-    b_group = p.add_argument_group('Temporal Fusion (FRIDA)')
-    b_group.add_argument('--frida-num-dirs', type=int, default=8, help='Number of projection directions K')
-    b_group.add_argument('--frida-scales', type=int, nargs='+', default=[1, 2, 4], help='Difference spans r for multiscale features')
-    b_group.add_argument('--frida-use-rms', action='store_true', default=True, help='Use RMS magnitude; otherwise L1 when disabled')
-    b_group.add_argument('--no-frida-use-rms', dest='frida_use_rms', action='store_false', help='Use L1 magnitude instead of RMS')
-    b_group.add_argument('--frida-beta', type=float, default=0.5, help='Initial residual gate beta')
-    b_group.add_argument('--frida-ortho', action='store_true', default=True, help='Orthonormalize projection each forward')
-    b_group.add_argument('--no-frida-ortho', dest='frida_ortho', action='store_false', help='Disable orthonormalization')
-    b_group.add_argument('--frida-bound-scale', type=float, default=2.5, help='Scale of tanh bounding after RMS normalization')
+    # ===== Temporal Fusion (FrierenFuse) =====
+    b_group = p.add_argument_group('Temporal Fusion (FrierenFuse)')
+    b_group.add_argument('--frieren-num-dirs', type=int, default=8, help='Number of projection directions K')
+    b_group.add_argument('--frieren-scales', type=int, nargs='+', default=[1, 2, 4], help='Difference spans r for multiscale features')
+    b_group.add_argument('--frieren-include-second', action='store_true', default=True, help='Include second-order differences')
+    b_group.add_argument('--no-frieren-include-second', dest='frieren_include_second', action='store_false', help='Disable second-order differences')
+    b_group.add_argument('--frieren-include-posneg', action='store_true', default=True, help='Include positive/negative variation split')
+    b_group.add_argument('--no-frieren-include-posneg', dest='frieren_include_posneg', action='store_false', help='Disable pos/neg variation split')
+    b_group.add_argument('--frieren-poly-order', type=int, default=2, help='Legendre trend polynomial order (0..P)')
+    b_group.add_argument('--frieren-beta', type=float, default=0.5, help='Initial residual gate beta')
+    b_group.add_argument('--frieren-ortho', action='store_true', default=True, help='Orthonormalize projection each forward')
+    b_group.add_argument('--no-frieren-ortho', dest='frieren_ortho', action='store_false', help='Disable orthonormalization')
+    b_group.add_argument('--frieren-bound-scale', type=float, default=2.5, help='Scale of tanh bounding after RMS normalization')
 
-    # Backward-compat aliases (deprecated BDRF flags -> FRIDA)
-    b_group.add_argument('--bdrf-num-dirs', type=int, help='[deprecated] use --frida-num-dirs')
-    b_group.add_argument('--bdrf-poly-order', type=int, help='[deprecated] replaced by --frida-scales')
-    b_group.add_argument('--bdrf-beta', type=float, help='[deprecated] use --frida-beta')
-    b_group.add_argument('--bdrf-ortho', dest='frida_ortho', action='store_true', help='[deprecated] use --frida-ortho')
-    b_group.add_argument('--no-bdrf-ortho', dest='frida_ortho', action='store_false', help='[deprecated] use --no-frida-ortho')
-    b_group.add_argument('--bdrf-bound-scale', type=float, help='[deprecated] use --frida-bound-scale')
-
-    # Backward-compat for older "square-*" flags -> map to FRIDA
-    b_group.add_argument('--square-num-dirs', type=int, dest='frida_num_dirs', help='[deprecated] use --frida-num-dirs')
-    b_group.add_argument('--square-poly-order', type=int, help='[deprecated] replaced by --frida-scales')
-    b_group.add_argument('--square-beta', type=float, dest='frida_beta', help='[deprecated] use --frida-beta')
-    b_group.add_argument('--square-ortho', action='store_true', dest='frida_ortho', help='[deprecated] use --frida-ortho')
-    b_group.add_argument('--no-square-ortho', action='store_false', dest='frida_ortho', help='[deprecated] use --no-frida-ortho')
-    b_group.add_argument('--square-quantiles', type=float, nargs='+', help='[deprecated] quantiles unused')
+    # Legacy FRIDA flags (accepted for backward compatibility; mapped to FrierenFuse)
+    b_group.add_argument('--frida-num-dirs', type=int, dest='frieren_num_dirs', help='[deprecated] use --frieren-num-dirs')
+    b_group.add_argument('--frida-scales', type=int, nargs='+', dest='frieren_scales', help='[deprecated] use --frieren-scales')
+    b_group.add_argument('--frida-beta', type=float, dest='frieren_beta', help='[deprecated] use --frieren-beta')
+    b_group.add_argument('--frida-ortho', action='store_true', dest='frieren_ortho', help='[deprecated] use --frieren-ortho')
+    b_group.add_argument('--no-frida-ortho', action='store_false', dest='frieren_ortho', help='[deprecated] use --no-frieren-ortho')
+    b_group.add_argument('--frida-bound-scale', type=float, dest='frieren_bound_scale', help='[deprecated] use --frieren-bound-scale')
+    # FRIDA had a use_rms toggle; FrierenFuse does not use it. Accept and ignore.
+    b_group.add_argument('--frida-use-rms', action='store_true', help='[deprecated] ignored by FrierenFuse')
+    b_group.add_argument('--no-frida-use-rms', action='store_false', dest='frida_use_rms', help='[deprecated] ignored by FrierenFuse')
 
     args = p.parse_args()
 
@@ -343,25 +341,11 @@ def parse_args() -> argparse.Namespace:
         # If dataset chosen, CSV paths are auto-generated; ignore user-provided ones
         pass
 
-    # Map deprecated BDRF flags into FRIDA flags; warn when present
-    if getattr(args, 'bdrf_num_dirs', None) is not None:
-        args.frida_num_dirs = args.bdrf_num_dirs
-        try:
-            print('[warn] --bdrf-num-dirs is deprecated; using --frida-num-dirs instead.', flush=True)
-        except Exception:
-            pass
-        delattr(args, 'bdrf_num_dirs')
-    if getattr(args, 'bdrf_beta', None) is not None:
-        args.frida_beta = args.bdrf_beta
-        try:
-            print('[warn] --bdrf-beta is deprecated; using --frida-beta instead.', flush=True)
-        except Exception:
-            pass
-        delattr(args, 'bdrf_beta')
+    # Remove deprecated mappings (older flags) and map loosely to FrierenFuse when possible
     if getattr(args, 'bdrf_bound_scale', None) is not None:
-        args.frida_bound_scale = args.bdrf_bound_scale
+        args.frieren_bound_scale = args.bdrf_bound_scale
         try:
-            print('[warn] --bdrf-bound-scale is deprecated; using --frida-bound-scale instead.', flush=True)
+            print('[warn] --bdrf-bound-scale is deprecated; using --frieren-bound-scale instead.', flush=True)
         except Exception:
             pass
         delattr(args, 'bdrf_bound_scale')
@@ -373,9 +357,9 @@ def parse_args() -> argparse.Namespace:
         for r in [2, 4, 8, 16]:
             if r <= max(2 ** max(P, 1), 16):
                 mapped.append(r)
-        args.frida_scales = mapped[:3]
+        args.frieren_scales = mapped[:3]
         try:
-            print(f"[warn] --bdrf-poly-order is deprecated; approximating with --frida-scales={args.frida_scales}.", flush=True)
+            print(f"[warn] --bdrf-poly-order is deprecated; approximating with --frieren-scales={args.frieren_scales}.", flush=True)
         except Exception:
             pass
         delattr(args, 'bdrf_poly_order')
@@ -392,9 +376,9 @@ def parse_args() -> argparse.Namespace:
         for r in [2, 4, 8, 16]:
             if r <= max(2 ** max(P, 1), 16):
                 mapped.append(r)
-        args.frida_scales = mapped[:3]
+        args.frieren_scales = mapped[:3]
         try:
-            print(f"[warn] --square-poly-order is deprecated; approximating with --frida-scales={args.frida_scales}.", flush=True)
+            print(f"[warn] --square-poly-order is deprecated; approximating with --frieren-scales={args.frieren_scales}.", flush=True)
         except Exception:
             pass
         delattr(args, 'square_poly_order')
@@ -461,11 +445,13 @@ def get_default_config() -> dict:
         # Hardware
         'devices': 1,
         'strategy': 'auto',
-        # FRIDA defaults
-        'frida_num_dirs': 8,
-        'frida_scales': [1, 2, 4],
-        'frida_use_rms': True,
-        'frida_beta': 0.5,
-        'frida_ortho': True,
-        'frida_bound_scale': 2.5,
+    # FrierenFuse defaults
+    'frieren_num_dirs': 8,
+    'frieren_scales': [1, 2, 4],
+    'frieren_include_second': True,
+    'frieren_include_posneg': True,
+    'frieren_poly_order': 2,
+    'frieren_beta': 0.5,
+    'frieren_ortho': True,
+    'frieren_bound_scale': 2.5,
     }
