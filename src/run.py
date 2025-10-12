@@ -117,8 +117,8 @@ class PeriodicPrinterCallback(L.Callback):
             'train/loss', 'loss', 'train_loss',
             'train/acc', 'val/acc', 'test/acc',
             'train/grad_norm_pre_clip', 'train/grad_norm_post_clip',
-            # FrierenFuse aux summaries
-            'frieren/U/mean', 'frieren/W/mean', 'frieren/scales/mean', 'frieren/feature_dim'
+            # RPFuse aux summaries
+            'rpfuse/W_dir2ch/mean', 'rpfuse/energy_q/mean', 'rpfuse/qs/len', 'rpfuse/cales/mean'
         ]:
             if key in metrics:
                 val = metrics[key]
@@ -137,14 +137,15 @@ class PeriodicPrinterCallback(L.Callback):
 
 
 class EpochSummaryPrinter(L.Callback):
-    """Callback to print a concise metric summary once每個 epoch 結束.
+    """Callback to print a concise metric summary once each epoch ends.
 
-    行為:
-      * 在 validation epoch 結束後 (on_validation_epoch_end) 輸出彙總 metrics
-      * 若沒有 validation (沒有 val dataloader) 則在 on_train_epoch_end 輸出 (避免重複)
-    列印內容包含: epoch, 監控的常見指標 (train/acc, train/loss, val/acc, val/loss,
-    epoch_test/acc, epoch_test/loss, test/acc, test/loss) 以及第一個 optimizer 的 lr。
+    Behavior:
+      * After validation epoch end (on_validation_epoch_end), print aggregated metrics
+      * If no validation loader is present, print at on_train_epoch_end (to avoid duplication)
+    Printed keys include: epoch, common metrics (train/acc, train/loss, val/acc, val/loss,
+    epoch_test/acc, epoch_test/loss, test/acc, test/loss) and the first optimizer's lr.
     """
+
     def __init__(self, extra_keys: list[str] | None = None):
         super().__init__()
         self.default_keys = [
@@ -152,8 +153,8 @@ class EpochSummaryPrinter(L.Callback):
             'val/acc', 'val/loss',
             'epoch_test/acc', 'epoch_test/loss',
             'test/acc', 'test/loss',
-            # FrierenFuse aux summaries
-            'frieren/U/mean', 'frieren/W/mean', 'frieren/scales/mean', 'frieren/feature_dim'
+            # RPFuse aux summaries
+            'rpfuse/W_dir2ch/mean', 'rpfuse/energy_q/mean', 'rpfuse/qs/len', 'rpfuse/cales/mean'
         ]
         self.extra_keys = extra_keys or []
 
@@ -330,13 +331,9 @@ def main():
         label_smoothing=args.label_smoothing,
         test_each_epoch=args.test_each_epoch,
     frieren_num_dirs=getattr(args, 'frieren_num_dirs', 8),
-    frieren_scales=tuple(getattr(args, 'frieren_scales', [1, 2, 4])),
-    frieren_include_second=getattr(args, 'frieren_include_second', True),
-    frieren_include_posneg=getattr(args, 'frieren_include_posneg', True),
-    frieren_poly_order=getattr(args, 'frieren_poly_order', 2),
+    rpfuse_q_max=getattr(args, 'rpfuse_q_max', 16),
     frieren_beta=getattr(args, 'frieren_beta', 0.5),
     frieren_ortho=getattr(args, 'frieren_ortho', True),
-    frieren_bound_scale=getattr(args, 'frieren_bound_scale', 2.5),
     )
     
     # Setup trainer

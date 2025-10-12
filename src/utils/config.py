@@ -300,30 +300,13 @@ def parse_args() -> argparse.Namespace:
         help='Distributed training strategy (auto, ddp, ddp_spawn, etc.)'
     )
     
-    # ===== Temporal Fusion (FrierenFuse) =====
-    b_group = p.add_argument_group('Temporal Fusion (FrierenFuse)')
-    b_group.add_argument('--frieren-num-dirs', type=int, default=8, help='Number of projection directions K')
-    b_group.add_argument('--frieren-scales', type=int, nargs='+', default=[1, 2, 4], help='Difference spans r for multiscale features')
-    b_group.add_argument('--frieren-include-second', action='store_true', default=True, help='Include second-order differences')
-    b_group.add_argument('--no-frieren-include-second', dest='frieren_include_second', action='store_false', help='Disable second-order differences')
-    b_group.add_argument('--frieren-include-posneg', action='store_true', default=True, help='Include positive/negative variation split')
-    b_group.add_argument('--no-frieren-include-posneg', dest='frieren_include_posneg', action='store_false', help='Disable pos/neg variation split')
-    b_group.add_argument('--frieren-poly-order', type=int, default=2, help='Legendre trend polynomial order (0..P)')
-    b_group.add_argument('--frieren-beta', type=float, default=0.5, help='Initial residual gate beta')
-    b_group.add_argument('--frieren-ortho', action='store_true', default=True, help='Orthonormalize projection each forward')
-    b_group.add_argument('--no-frieren-ortho', dest='frieren_ortho', action='store_false', help='Disable orthonormalization')
-    b_group.add_argument('--frieren-bound-scale', type=float, default=2.5, help='Scale of tanh bounding after RMS normalization')
-
-    # Legacy FRIDA flags (accepted for backward compatibility; mapped to FrierenFuse)
-    b_group.add_argument('--frida-num-dirs', type=int, dest='frieren_num_dirs', help='[deprecated] use --frieren-num-dirs')
-    b_group.add_argument('--frida-scales', type=int, nargs='+', dest='frieren_scales', help='[deprecated] use --frieren-scales')
-    b_group.add_argument('--frida-beta', type=float, dest='frieren_beta', help='[deprecated] use --frieren-beta')
-    b_group.add_argument('--frida-ortho', action='store_true', dest='frieren_ortho', help='[deprecated] use --frieren-ortho')
-    b_group.add_argument('--no-frida-ortho', action='store_false', dest='frieren_ortho', help='[deprecated] use --no-frieren-ortho')
-    b_group.add_argument('--frida-bound-scale', type=float, dest='frieren_bound_scale', help='[deprecated] use --frieren-bound-scale')
-    # FRIDA had a use_rms toggle; FrierenFuse does not use it. Accept and ignore.
-    b_group.add_argument('--frida-use-rms', action='store_true', help='[deprecated] ignored by FrierenFuse')
-    b_group.add_argument('--no-frida-use-rms', action='store_false', dest='frida_use_rms', help='[deprecated] ignored by FrierenFuse')
+    # ===== Temporal Fusion (RPFuse) =====
+    b_group = p.add_argument_group('Temporal Fusion (RPFuse)')
+    b_group.add_argument('--frieren-num-dirs', type=int, default=8, help='[compat] Number of projection directions K (alias for RPFuse)')
+    b_group.add_argument('--rpfuse-q-max', type=int, default=16, help='Maximum integer period q considered (≤ T)')
+    b_group.add_argument('--frieren-beta', type=float, default=0.5, help='[compat] Initial residual gate beta (alias for RPFuse)')
+    b_group.add_argument('--frieren-ortho', action='store_true', default=True, help='[compat] Orthonormalize projection each forward')
+    b_group.add_argument('--no-frieren-ortho', dest='frieren_ortho', action='store_false', help='[compat] Disable orthonormalization')
 
     args = p.parse_args()
 
@@ -341,11 +324,11 @@ def parse_args() -> argparse.Namespace:
         # If dataset chosen, CSV paths are auto-generated; ignore user-provided ones
         pass
 
-    # Remove deprecated mappings (older flags) and map loosely to FrierenFuse when possible
+    # Remove deprecated mappings (older flags) and map loosely to RPFuse when possible
     if getattr(args, 'bdrf_bound_scale', None) is not None:
         args.frieren_bound_scale = args.bdrf_bound_scale
         try:
-            print('[warn] --bdrf-bound-scale is deprecated; using --frieren-bound-scale instead.', flush=True)
+            print('[warn] --bdrf-bound-scale is deprecated and ignored by RPFuse.', flush=True)
         except Exception:
             pass
         delattr(args, 'bdrf_bound_scale')
@@ -359,7 +342,7 @@ def parse_args() -> argparse.Namespace:
                 mapped.append(r)
         args.frieren_scales = mapped[:3]
         try:
-            print(f"[warn] --bdrf-poly-order is deprecated; approximating with --frieren-scales={args.frieren_scales}.", flush=True)
+            print(f"[warn] --bdrf-poly-order is deprecated and ignored by RPFuse.", flush=True)
         except Exception:
             pass
         delattr(args, 'bdrf_poly_order')
@@ -378,7 +361,7 @@ def parse_args() -> argparse.Namespace:
                 mapped.append(r)
         args.frieren_scales = mapped[:3]
         try:
-            print(f"[warn] --square-poly-order is deprecated; approximating with --frieren-scales={args.frieren_scales}.", flush=True)
+            print(f"[warn] --square-poly-order is deprecated and ignored by RPFuse.", flush=True)
         except Exception:
             pass
         delattr(args, 'square_poly_order')
@@ -445,13 +428,9 @@ def get_default_config() -> dict:
         # Hardware
         'devices': 1,
         'strategy': 'auto',
-    # FrierenFuse defaults
+    # RPFuse defaults (compat keys)
     'frieren_num_dirs': 8,
-    'frieren_scales': [1, 2, 4],
-    'frieren_include_second': True,
-    'frieren_include_posneg': True,
-    'frieren_poly_order': 2,
+    'rpfuse_q_max': 16,
     'frieren_beta': 0.5,
     'frieren_ortho': True,
-    'frieren_bound_scale': 2.5,
     }

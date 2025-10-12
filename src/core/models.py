@@ -22,7 +22,7 @@ import lightning as L
 from pathlib import Path
 import sys
 
-from .frieren_fuse import FrierenFuse
+from .components import RPFuse
 
 
 class ViTTokenBackbone(nn.Module):
@@ -142,15 +142,11 @@ class GraphSamplerActionModel(L.LightningModule):
         use_gat: bool = True,
         label_smoothing: float = 0.0,
         test_each_epoch: bool = True,
-    # FrierenFuse hyperparameters
-    frieren_num_dirs: int = 8,
-    frieren_scales: Tuple[int, ...] = (1, 2, 4),
-    frieren_include_second: bool = True,
-    frieren_include_posneg: bool = True,
-    frieren_poly_order: int = 2,
-    frieren_beta: float = 0.5,
-    frieren_ortho: bool = True,
-    frieren_bound_scale: float = 2.5,
+        # RPFuse hyperparameters (mapped from previous FrierenFuse args where applicable)
+        frieren_num_dirs: int = 8,
+        rpfuse_q_max: int = 16,
+        frieren_beta: float = 0.5,
+        frieren_ortho: bool = True,
     ):
         super().__init__()
         self.save_hyperparameters()
@@ -165,16 +161,12 @@ class GraphSamplerActionModel(L.LightningModule):
         # Probe backbone to get dimensions
         d_model, n_tokens = self._probe_backbone_dims()
         # Selection removed; frame_topk/token_topk kept for CLI backward-compat but unused
-        # Replace fusion layer with FrierenFuse
-        self.fusion = FrierenFuse(
+        # Replace FrierenFuse with RPFuse
+        self.fusion = RPFuse(
             d_model=d_model,
             num_dirs=frieren_num_dirs,
-            scales=tuple(frieren_scales),
-            include_second=frieren_include_second,
-            include_posneg=frieren_include_posneg,
-            poly_order=frieren_poly_order,
-            ortho_every_forward=frieren_ortho,
-            bound_scale=frieren_bound_scale,
+            q_max=rpfuse_q_max,
+            ortho_dirs=frieren_ortho,
             beta_init=frieren_beta,
         )
         self._last_fuse_aux = None  # to stash aux for logging
@@ -283,7 +275,7 @@ class GraphSamplerActionModel(L.LightningModule):
         loss = self.criterion(logits, label)
         acc = (logits.argmax(dim=-1) == label).float().mean()
 
-    # No FrierenFuse-specific logs beyond aux summary
+    # No RPFuse-specific logs beyond aux summary
         
         self.log('train/loss', loss, prog_bar=True, on_step=True, on_epoch=True)
         self.log('train/acc', acc, prog_bar=True, on_step=True, on_epoch=True)
@@ -315,7 +307,7 @@ class GraphSamplerActionModel(L.LightningModule):
         loss = self.criterion(logits, label)
         acc = (logits.argmax(dim=-1) == label).float().mean()
 
-    # No FrierenFuse-specific logs here
+    # No RPFuse-specific logs here
         
         self.log('val/loss', loss, prog_bar=True, on_epoch=True)
         self.log('val/acc', acc, prog_bar=True, on_epoch=True)
@@ -341,23 +333,30 @@ class GraphSamplerActionModel(L.LightningModule):
         Optionally runs test evaluation without invoking Trainer.test
         to avoid nested training loops.
         """
-        # Log FrierenFuse aux summary: mean of U, W, scales, and feature_dim
+        # Log RPFuse aux summary: mean of W_dir2ch, energy_q, and length of qs
         try:
             aux = self._last_fuse_aux or {}
-            U = aux.get('U', None)
-            W = aux.get('W', None)
-            scales = aux.get('scales', None)
-            fdim = aux.get('feature_dim', None)
-            if U is not None:
-                self.log('frieren/U/mean', U.detach().float().mean().item(), on_epoch=True, prog_bar=False)
-            if W is not None:
-                self.log('frieren/W/mean', W.detach().float().mean().item(), on_epoch=True, prog_bar=False)
-            if scales is not None:
-                self.log('frieren/scales/mean', scales.detach().float().mean().item(), on_epoch=True, prog_bar=False)
-            if fdim is not None:
-                # feature_dim is scalar tensor; take mean for safety
-                val = fdim.detach().float().mean().item()
-                self.log('frieren/feature_dim', val, on_epoch=True, prog_bar=False)
+            W_dir2ch = aux.get('W_dir2ch', None)
+            energy_q = aux.get('energy_q', None)
+            qs = aux.get('qs', None)
+            cales = aux.get('cales', None)
+            if W_dir2ch is not None:
+                self.log('rpfuse/W_dir2ch/mean', W_dir2ch.detach().float().mean().item(), on_epoch=True, prog_bar=False)
+            if energy_q is not None:
+                self.log('rpfuse/energy_q/mean', energy_q.detach().float().mean().item(), on_epoch=True, prog_bar=False)
+            # For multi-dim structures, average
+            if qs is not None:
+                try:
+                    # qs can be list[int]; log its length
+                    self.log('rpfuse/qs/len', float(len(qs)), on_epoch=True, prog_bar=False)
+                except Exception:
+                    pass
+            if cales is not None:
+                try:
+                    val = cales.detach().float().mean().item()
+                    self.log('rpfuse/cales/mean', val, on_epoch=True, prog_bar=False)
+                except Exception:
+                    pass
         except Exception:
             pass
 
@@ -394,21 +393,27 @@ class GraphSamplerActionModel(L.LightningModule):
         self.train()
 
     def on_validation_epoch_end(self):
-        """Log FrierenFuse aux summary at validation epoch end as well."""
+        """Log RPFuse aux summary at validation epoch end as well."""
         try:
             aux = self._last_fuse_aux or {}
-            U = aux.get('U', None)
-            W = aux.get('W', None)
-            scales = aux.get('scales', None)
-            fdim = aux.get('feature_dim', None)
-            if U is not None:
-                self.log('frieren/U/mean', U.detach().float().mean().item(), on_epoch=True, prog_bar=False)
-            if W is not None:
-                self.log('frieren/W/mean', W.detach().float().mean().item(), on_epoch=True, prog_bar=False)
-            if scales is not None:
-                self.log('frieren/scales/mean', scales.detach().float().mean().item(), on_epoch=True, prog_bar=False)
-            if fdim is not None:
-                val = fdim.detach().float().mean().item()
-                self.log('frieren/feature_dim', val, on_epoch=True, prog_bar=False)
+            W_dir2ch = aux.get('W_dir2ch', None)
+            energy_q = aux.get('energy_q', None)
+            qs = aux.get('qs', None)
+            cales = aux.get('cales', None)
+            if W_dir2ch is not None:
+                self.log('rpfuse/W_dir2ch/mean', W_dir2ch.detach().float().mean().item(), on_epoch=True, prog_bar=False)
+            if energy_q is not None:
+                self.log('rpfuse/energy_q/mean', energy_q.detach().float().mean().item(), on_epoch=True, prog_bar=False)
+            if qs is not None:
+                try:
+                    self.log('rpfuse/qs/len', float(len(qs)), on_epoch=True, prog_bar=False)
+                except Exception:
+                    pass
+            if cales is not None:
+                try:
+                    val = cales.detach().float().mean().item()
+                    self.log('rpfuse/cales/mean', val, on_epoch=True, prog_bar=False)
+                except Exception:
+                    pass
         except Exception:
             pass
