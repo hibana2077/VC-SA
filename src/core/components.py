@@ -174,7 +174,7 @@ class RPFuse(nn.Module):
         num_dirs: int = 8,     # Few directions to compress D -> K
         q_max: int = 16,       # Max integer period considered (≤ T)
         ortho_dirs: bool = True,
-        beta_init: float = 0.5,
+        beta_init: float = -2.0,
     ):
         super().__init__()
         self.d_model = int(d_model)
