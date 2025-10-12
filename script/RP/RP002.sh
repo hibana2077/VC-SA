@@ -22,8 +22,8 @@ python3 -m src.run \
   --data-root ./datasets/hmdb51 \
   --freeze-backbone \
   --vit-name deit3_base_patch16_224.fb_in22k_ft_in1k \
-  --frames-per-clip 32 \
-  --frieren-num-dirs 10 \
+  --frames-per-clip 16 \
+  --frieren-num-dirs 6 \
   --batch-size 2 \
   --num-workers 4 \
   --precision 32 \
