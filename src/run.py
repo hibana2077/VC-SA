@@ -117,8 +117,8 @@ class PeriodicPrinterCallback(L.Callback):
             'train/loss', 'loss', 'train_loss',
             'train/acc', 'val/acc', 'test/acc',
             'train/grad_norm_pre_clip', 'train/grad_norm_post_clip',
-            # RPFuse aux summaries
-            'rpfuse/W_dir2ch/mean', 'rpfuse/energy_q/mean', 'rpfuse/qs/len', 'rpfuse/cales/mean'
+            # SQuaRe-Fuse summary
+            'square/beta'
         ]:
             if key in metrics:
                 val = metrics[key]
@@ -153,8 +153,8 @@ class EpochSummaryPrinter(L.Callback):
             'val/acc', 'val/loss',
             'epoch_test/acc', 'epoch_test/loss',
             'test/acc', 'test/loss',
-            # RPFuse aux summaries
-            'rpfuse/W_dir2ch/mean', 'rpfuse/energy_q/mean', 'rpfuse/qs/len', 'rpfuse/cales/mean'
+            # SQuaRe-Fuse summary
+            'square/beta'
         ]
         self.extra_keys = extra_keys or []
 
@@ -331,7 +331,6 @@ def main():
         label_smoothing=args.label_smoothing,
         test_each_epoch=args.test_each_epoch,
     frieren_num_dirs=getattr(args, 'frieren_num_dirs', 8),
-    rpfuse_q_max=getattr(args, 'rpfuse_q_max', 16),
     frieren_beta=getattr(args, 'frieren_beta', 0.5),
     frieren_ortho=getattr(args, 'frieren_ortho', True),
     )

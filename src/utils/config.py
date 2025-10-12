@@ -300,11 +300,10 @@ def parse_args() -> argparse.Namespace:
         help='Distributed training strategy (auto, ddp, ddp_spawn, etc.)'
     )
     
-    # ===== Temporal Fusion (RPFuse) =====
-    b_group = p.add_argument_group('Temporal Fusion (RPFuse)')
-    b_group.add_argument('--frieren-num-dirs', type=int, default=8, help='[compat] Number of projection directions K (alias for RPFuse)')
-    b_group.add_argument('--rpfuse-q-max', type=int, default=16, help='Maximum integer period q considered (≤ T)')
-    b_group.add_argument('--frieren-beta', type=float, default=0.5, help='[compat] Initial residual gate beta (alias for RPFuse)')
+    # ===== Temporal Fusion (SQuaRe-Fuse) =====
+    b_group = p.add_argument_group('Temporal Fusion (SQuaRe-Fuse)')
+    b_group.add_argument('--frieren-num-dirs', type=int, default=8, help='[compat] Number of projection directions K (alias for SQuaRe-Fuse)')
+    b_group.add_argument('--frieren-beta', type=float, default=0.5, help='[compat] Initial residual gate beta (alias for SQuaRe-Fuse)')
     b_group.add_argument('--frieren-ortho', action='store_true', default=True, help='[compat] Orthonormalize projection each forward')
     b_group.add_argument('--no-frieren-ortho', dest='frieren_ortho', action='store_false', help='[compat] Disable orthonormalization')
 
@@ -324,11 +323,11 @@ def parse_args() -> argparse.Namespace:
         # If dataset chosen, CSV paths are auto-generated; ignore user-provided ones
         pass
 
-    # Remove deprecated mappings (older flags) and map loosely to RPFuse when possible
+    # Remove deprecated mappings (older flags) and map loosely to SQuaRe-Fuse when possible
     if getattr(args, 'bdrf_bound_scale', None) is not None:
         args.frieren_bound_scale = args.bdrf_bound_scale
         try:
-            print('[warn] --bdrf-bound-scale is deprecated and ignored by RPFuse.', flush=True)
+            print('[warn] --bdrf-bound-scale is deprecated and ignored by SQuaRe-Fuse.', flush=True)
         except Exception:
             pass
         delattr(args, 'bdrf_bound_scale')
@@ -342,7 +341,7 @@ def parse_args() -> argparse.Namespace:
                 mapped.append(r)
         args.frieren_scales = mapped[:3]
         try:
-            print(f"[warn] --bdrf-poly-order is deprecated and ignored by RPFuse.", flush=True)
+            print(f"[warn] --bdrf-poly-order is deprecated and ignored by SQuaRe-Fuse.", flush=True)
         except Exception:
             pass
         delattr(args, 'bdrf_poly_order')
@@ -361,7 +360,7 @@ def parse_args() -> argparse.Namespace:
                 mapped.append(r)
         args.frieren_scales = mapped[:3]
         try:
-            print(f"[warn] --square-poly-order is deprecated and ignored by RPFuse.", flush=True)
+            print(f"[warn] --square-poly-order is deprecated and ignored by SQuaRe-Fuse.", flush=True)
         except Exception:
             pass
         delattr(args, 'square_poly_order')
@@ -428,9 +427,8 @@ def get_default_config() -> dict:
         # Hardware
         'devices': 1,
         'strategy': 'auto',
-    # RPFuse defaults (compat keys)
+    # SQuaRe-Fuse defaults (compat keys)
     'frieren_num_dirs': 8,
-    'rpfuse_q_max': 16,
     'frieren_beta': 0.5,
     'frieren_ortho': True,
     }

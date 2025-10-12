@@ -1,4 +1,4 @@
-下面給你一個**可直接替換**的 drop-in 模組：**SQuaRe-Fuse（Sliced-Quantile & Quadratic-trend Robust Fusion）**。它吃 ViT 的序列特徵 `x ∈ [B, T, N, D]`，輸出同形狀的 `h ∈ [B, T, N, D]`（兼容你現行的 shape 習慣與 head；若你的 cls 讀取是 broadcast/池化都能工作） 。為了少改動，你也可以把它**當作 RamaFuse 的替身**來用，forward 介面與回傳 `(h, memory_dict)` 也相容 。
+下面給你一個**可直接替換**的 drop-in 模組：**SQuaRe-Fuse（Sliced-Quantile & Quadratic-trend Robust Fusion）**。它吃 ViT 的序列特徵 `x ∈ [B, T, N, D]`，輸出同形狀的 `h ∈ [B, T, N, D]`（兼容你現行的 shape 習慣與 head；若你的 cls 讀取是 broadcast/池化都能工作）。
 
 ---
 
@@ -23,7 +23,7 @@
 
 **輸入/輸出與相容性**
 
-* `forward(x:[B,T,N,D], valid_mask:[B,T,N]=None, ...) → (h:[B,T,N,D], memory_dict)`
+* `forward(x:[B,T,N,D], valid_mask:[B,T,N]=None, ...) → h:[B,T,N,D]`
 * 保持和你原本下游 cls/readout 的耦合最小（等形狀殘差輸出、可直接替換 RamaFuse） 。
 
 **三步融合**（完全不含 Attention/SSM/Graph/分解/低秩核）
@@ -42,7 +42,7 @@
 
 # 直接可用的 PyTorch 實作（Drop-in）
 
-> 檔名建議：`fusion_square.py`。介面比照你的 `RamaFuse`（回傳 `(h, mem)`），但輸入直接吃 ViT 輸出 `x:[B,T,N,D]`。你若希望完全替代「RamaFuse」名字，也可把類名改成 `RamaFuse` 後直接覆蓋。形狀與註解沿用你檔案慣例。 
+> 檔名建議：`fusion_square.py`。輸入直接吃 ViT 輸出 `x:[B,T,N,D]`。
 
 ```python
 # fusion_square.py
@@ -133,8 +133,7 @@ class SQuaReFuse(nn.Module):
     def forward(self,
                 x: torch.Tensor,                # [B,T,N,D]
                 valid_mask: Optional[torch.Tensor] = None,  # [B,T,N]
-                memory_id: str = None,
-                reset_memory: bool = False):
+            ):
         B, T, N, D = x.shape
         device, dtype = x.device, x.dtype
         if valid_mask is None:
@@ -170,10 +169,7 @@ class SQuaReFuse(nn.Module):
         h = x + self.beta * y_btnd
         h = valid_mask[..., None] * h + (1.0 - valid_mask[..., None]) * x
 
-        key = memory_id or "default"
-        if reset_memory or (key not in self._mem_state):
-            self._mem_state[key] = torch.zeros(B, N, D, device=device, dtype=dtype)
-        return h, {key: self._mem_state[key]}
+        return h
 ```
 
 **整合方法**

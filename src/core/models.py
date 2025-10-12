@@ -22,7 +22,7 @@ import lightning as L
 from pathlib import Path
 import sys
 
-from .components import RPFuse
+from .components import SQuaReFuse
 
 
 class ViTTokenBackbone(nn.Module):
@@ -142,11 +142,10 @@ class GraphSamplerActionModel(L.LightningModule):
         use_gat: bool = True,
         label_smoothing: float = 0.0,
         test_each_epoch: bool = True,
-        # RPFuse hyperparameters (mapped from previous FrierenFuse args where applicable)
-        frieren_num_dirs: int = 8,
-        rpfuse_q_max: int = 16,
-        frieren_beta: float = 0.5,
-        frieren_ortho: bool = True,
+    # SQuaRe-Fuse hyperparameters (compat arg names)
+    frieren_num_dirs: int = 8,
+    frieren_beta: float = 0.5,
+    frieren_ortho: bool = True,
     ):
         super().__init__()
         self.save_hyperparameters()
@@ -161,15 +160,16 @@ class GraphSamplerActionModel(L.LightningModule):
         # Probe backbone to get dimensions
         d_model, n_tokens = self._probe_backbone_dims()
         # Selection removed; frame_topk/token_topk kept for CLI backward-compat but unused
-        # Replace FrierenFuse with RPFuse
-        self.fusion = RPFuse(
+        # Replace previous fuse with SQuaRe-Fuse
+        # Map compat args: frieren_num_dirs -> num_dirs, frieren_beta -> beta_init
+        self.fusion = SQuaReFuse(
             d_model=d_model,
             num_dirs=frieren_num_dirs,
-            q_max=rpfuse_q_max,
-            ortho_dirs=frieren_ortho,
+            quantiles=(0.1, 0.5, 0.9),
+            poly_order=2,
             beta_init=frieren_beta,
+            ortho_every_forward=frieren_ortho,
         )
-        self._last_fuse_aux = None  # to stash aux for logging
         
         # Classification head
         self.cls_head = nn.Sequential(
@@ -256,9 +256,7 @@ class GraphSamplerActionModel(L.LightningModule):
         tokens = tokens.view(B, T, N, D)
         
         # Temporal fusion directly on full token grid (no selection)
-        h, aux = self.fusion(tokens)
-        # Stash aux for logging
-        self._last_fuse_aux = aux
+        h = self.fusion(tokens)
         
         # Global average pooling over time and tokens
         feat = h.mean(dim=(1, 2))  # [B, D]
@@ -275,10 +273,14 @@ class GraphSamplerActionModel(L.LightningModule):
         loss = self.criterion(logits, label)
         acc = (logits.argmax(dim=-1) == label).float().mean()
 
-    # No RPFuse-specific logs beyond aux summary
-        
         self.log('train/loss', loss, prog_bar=True, on_step=True, on_epoch=True)
         self.log('train/acc', acc, prog_bar=True, on_step=True, on_epoch=True)
+        # Log current beta value of SQuaRe-Fuse
+        try:
+            beta_val = float(self.fusion.beta.detach().cpu())
+            self.log('square/beta', beta_val, prog_bar=False, on_step=True, on_epoch=True)
+        except Exception:
+            pass
         
         return loss
 
@@ -307,10 +309,14 @@ class GraphSamplerActionModel(L.LightningModule):
         loss = self.criterion(logits, label)
         acc = (logits.argmax(dim=-1) == label).float().mean()
 
-    # No RPFuse-specific logs here
-        
         self.log('val/loss', loss, prog_bar=True, on_epoch=True)
         self.log('val/acc', acc, prog_bar=True, on_epoch=True)
+        # Log current beta value of SQuaRe-Fuse
+        try:
+            beta_val = float(self.fusion.beta.detach().cpu())
+            self.log('square/beta', beta_val, prog_bar=False, on_epoch=True)
+        except Exception:
+            pass
         
         return {'val_loss': loss, 'val_acc': acc}
     
@@ -333,30 +339,10 @@ class GraphSamplerActionModel(L.LightningModule):
         Optionally runs test evaluation without invoking Trainer.test
         to avoid nested training loops.
         """
-        # Log RPFuse aux summary: mean of W_dir2ch, energy_q, and length of qs
+        # Log current beta (epoch-level)
         try:
-            aux = self._last_fuse_aux or {}
-            W_dir2ch = aux.get('W_dir2ch', None)
-            energy_q = aux.get('energy_q', None)
-            qs = aux.get('qs', None)
-            cales = aux.get('cales', None)
-            if W_dir2ch is not None:
-                self.log('rpfuse/W_dir2ch/mean', W_dir2ch.detach().float().mean().item(), on_epoch=True, prog_bar=False)
-            if energy_q is not None:
-                self.log('rpfuse/energy_q/mean', energy_q.detach().float().mean().item(), on_epoch=True, prog_bar=False)
-            # For multi-dim structures, average
-            if qs is not None:
-                try:
-                    # qs can be list[int]; log its length
-                    self.log('rpfuse/qs/len', float(len(qs)), on_epoch=True, prog_bar=False)
-                except Exception:
-                    pass
-            if cales is not None:
-                try:
-                    val = cales.detach().float().mean().item()
-                    self.log('rpfuse/cales/mean', val, on_epoch=True, prog_bar=False)
-                except Exception:
-                    pass
+            beta_val = float(self.fusion.beta.detach().cpu())
+            self.log('square/beta', beta_val, on_epoch=True, prog_bar=False)
         except Exception:
             pass
 
@@ -393,27 +379,9 @@ class GraphSamplerActionModel(L.LightningModule):
         self.train()
 
     def on_validation_epoch_end(self):
-        """Log RPFuse aux summary at validation epoch end as well."""
+        """Log SQuaRe-Fuse beta at validation epoch end."""
         try:
-            aux = self._last_fuse_aux or {}
-            W_dir2ch = aux.get('W_dir2ch', None)
-            energy_q = aux.get('energy_q', None)
-            qs = aux.get('qs', None)
-            cales = aux.get('cales', None)
-            if W_dir2ch is not None:
-                self.log('rpfuse/W_dir2ch/mean', W_dir2ch.detach().float().mean().item(), on_epoch=True, prog_bar=False)
-            if energy_q is not None:
-                self.log('rpfuse/energy_q/mean', energy_q.detach().float().mean().item(), on_epoch=True, prog_bar=False)
-            if qs is not None:
-                try:
-                    self.log('rpfuse/qs/len', float(len(qs)), on_epoch=True, prog_bar=False)
-                except Exception:
-                    pass
-            if cales is not None:
-                try:
-                    val = cales.detach().float().mean().item()
-                    self.log('rpfuse/cales/mean', val, on_epoch=True, prog_bar=False)
-                except Exception:
-                    pass
+            beta_val = float(self.fusion.beta.detach().cpu())
+            self.log('square/beta', beta_val, on_epoch=True, prog_bar=False)
         except Exception:
             pass
