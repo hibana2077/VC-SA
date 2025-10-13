@@ -25,6 +25,6 @@ python3 -c "import timm; timm.create_model('eva_giant_patch14_224.clip_ft_in1k',
 | Code | Model Name | Test Acc |
 |------|------------|----------|
 | ABL001 | cait_s24_224.fb_dist_in1k | 0.7096 |
-| ABL002 | vit_base_patch16_224.dino | ? |
-| ABL003 | deit3_base_patch16_224.fb_in22k_ft_in1k | ? |
-| ABL004 | beitv2_base_patch16_224.in1k_ft_in22k_in1k | ? |
+| ABL002 | vit_base_patch16_224.dino | 0.6767 |
+| ABL003 | deit3_base_patch16_224.fb_in22k_ft_in1k | 0.7225 |
+| ABL004 | beitv2_base_patch16_224.in1k_ft_in22k_in1k | 0.7489 |
