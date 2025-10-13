@@ -65,7 +65,7 @@ def parse_args() -> argparse.Namespace:
         '--dataset',
         type=str,
         default=None,
-        choices=['hmdb51', 'diving48'],
+        choices=['hmdb51', 'diving48', 'ssv2'],
         help='Name of built-in dataset to auto-generate annotation CSVs (overrides --train-anno/--val-anno/--test-anno)'
     )
     data_group.add_argument(
