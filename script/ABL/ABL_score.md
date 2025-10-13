@@ -21,3 +21,9 @@ python3 -c "import timm; timm.create_model('eva_giant_patch14_224.clip_ft_in1k',
 - deit3_small_patch16_224.fb_in22k_ft_in1k
 
 ## Summary of Test Accuracies
+
+| Code | Model Name | Test Acc |
+|------|------------|----------|
+| ABL001 | cait_s24_224.fb_dist_in1k | ? |
+| ABL002 | vit_base_patch16_224.dino | ? |
+| ABL003 | deit3_base_patch16_224.fb_in22k_ft_in1k | ? |
