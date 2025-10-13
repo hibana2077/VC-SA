@@ -1,13 +1,13 @@
 #!/bin/bash
 #PBS -P rp06
-#PBS -q gpuvolta
+#PBS -q dgxa100
 #PBS -l ngpus=1
-#PBS -l ncpus=12
+#PBS -l ncpus=16
 #PBS -l mem=16GB
 #PBS -l walltime=24:00:00
 #PBS -l wd
 #PBS -l storage=scratch/rp06
-#PBS -l jobfs=2GB
+#PBS -l jobfs=20GB
 
 module load cuda/12.6.2
 module load ffmpeg/4.1.3
