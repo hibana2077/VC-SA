@@ -16,4 +16,4 @@ export HF_HOME="/scratch/rp06/sl5952/VC-SA/.cache"
 export HF_HUB_OFFLINE=1
 # aimv2_large_patch14_224.apple_pt_dist
 cd ../..
-python3 -m src.run --dataset hmdb51 --data-root ./datasets/hmdb51 --freeze-backbone --vit-name aimv2_large_patch14_224.apple_pt_dist --frames-per-clip 12 --frieren-num-dirs 10 --batch-size 2 --num-workers 4 --precision 32 --no-future-warning --no-user-warning --use-test-as-val --no-tqdm --print-interval 1000 >> ABL006.log 2>&1
+python3 -m src.run --dataset hmdb51 --data-root ./datasets/hmdb51 --freeze-backbone --vit-name aimv2_large_patch14_224.apple_pt_dist --frames-per-clip 12 --frieren-num-dirs 10 --batch-size 2 --num-workers 4 --precision 32 --no-future-warning --no-user-warning --use-test-as-val --no-tqdm --wo-square --print-interval 1000 >> ABL006.log 2>&1
