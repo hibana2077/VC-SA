@@ -50,7 +50,7 @@ import warnings
 
 import torch
 import lightning as L
-from lightning.pytorch.callbacks import ModelCheckpoint, LearningRateMonitor
+from lightning.pytorch.callbacks import LearningRateMonitor
 from lightning.pytorch.loggers import CSVLogger
 
 # Import modularized components
@@ -78,20 +78,24 @@ def setup_callbacks(output_dir: str, project_name: str, monitor_metric: str = 'v
     elif monitor_metric == 'train/acc':
         filename_tmpl += '-train_acc{train/acc:.3f}'
 
-    ckpt_kwargs = dict(
-        dirpath=os.path.join(output_dir, project_name, 'checkpoints'),
-        filename=filename_tmpl,
+    # We previously used ModelCheckpoint which writes frequently.
+    # To reduce I/O, we will only save a single best checkpoint at the end of training.
+    # Keep LR monitor for observability.
+    lr_cb = LearningRateMonitor(logging_interval='epoch')
+
+    # Create directory for final checkpoint
+    final_dir = os.path.join(output_dir, project_name, 'checkpoints')
+
+    # Add custom callback that caches best weights in memory and writes once on fit end
+    save_best_cb = SaveBestAtEnd(
         monitor=monitor_metric,
         mode='max',
-        save_top_k=3,
-        save_last=True,
-        auto_insert_metric_name=False,
+        dirpath=final_dir,
+        filename='best-at-end-{monitor}-epoch{epoch:03d}-score{score:.4f}.ckpt',
+        verbose=True,
     )
-    ckpt_cb = ModelCheckpoint(**ckpt_kwargs)
-    
-    lr_cb = LearningRateMonitor(logging_interval='epoch')
-    
-    return [ckpt_cb, lr_cb]
+
+    return [lr_cb, save_best_cb]
 
 
 class PeriodicPrinterCallback(L.Callback):
@@ -191,6 +195,115 @@ class EpochSummaryPrinter(L.Callback):
             self._print_summary(trainer)
 
 
+class SaveBestAtEnd(L.Callback):
+    """Cache the best model weights by a monitored metric and save a single checkpoint at the end.
+
+    Args:
+        monitor: Metric name in trainer.callback_metrics (e.g., 'val/acc', 'test/acc', 'train/acc').
+        mode: 'max' or 'min'.
+        dirpath: Directory to write the final checkpoint into.
+        filename: Filename template. You can use placeholders: {monitor}, {epoch}, {score}.
+        verbose: Print updates when a new best is found and on save.
+
+    Notes:
+        - Works with single or multi-GPU. Only global zero will write.
+        - Saves a minimal Lightning-compatible checkpoint containing just 'state_dict'.
+    """
+
+    def __init__(self, monitor: str = 'val/acc', mode: str = 'max', dirpath: str | None = None,
+                 filename: str = 'best-at-end-{monitor}-epoch{epoch:03d}-score{score:.4f}.ckpt', verbose: bool = True):
+        super().__init__()
+        self.monitor = monitor
+        self.mode = mode.lower()
+        assert self.mode in {'max', 'min'}
+        self.dirpath = dirpath
+        self.filename = filename
+        self.verbose = verbose
+        self._best_score = float('-inf') if self.mode == 'max' else float('inf')
+        self._best_epoch = -1
+        self._best_state: dict[str, torch.Tensor] | None = None
+        self._saved_once = False
+
+    def _is_better(self, new: float) -> bool:
+        return (new > self._best_score) if self.mode == 'max' else (new < self._best_score)
+
+    @staticmethod
+    def _cpu_state_dict(pl_module) -> dict:
+        # Detach and move to CPU to free GPU memory and ensure serializability
+        return {k: v.detach().cpu().clone() for k, v in pl_module.state_dict().items()}
+
+    def _maybe_update(self, trainer: L.Trainer, pl_module):
+        metrics = trainer.callback_metrics
+        if self.monitor not in metrics:
+            return
+        try:
+            val = float(metrics[self.monitor])
+        except Exception:
+            return
+        if self._is_better(val):
+            self._best_score = val
+            self._best_epoch = trainer.current_epoch
+            self._best_state = self._cpu_state_dict(pl_module)
+            if self.verbose:
+                print(f"[SaveBestAtEnd] New best {self.monitor}={val:.4f} at epoch {self._best_epoch}", flush=True)
+
+    # Update after validation epochs (common case for 'val/acc')
+    def on_validation_epoch_end(self, trainer: L.Trainer, pl_module):  # type: ignore
+        self._maybe_update(trainer, pl_module)
+
+    # Update for training-monitored metrics
+    def on_train_epoch_end(self, trainer: L.Trainer, pl_module):  # type: ignore
+        if self.monitor.startswith('train/'):
+            self._maybe_update(trainer, pl_module)
+
+    # Update for test-monitored metrics
+    def on_test_epoch_end(self, trainer: L.Trainer, pl_module):  # type: ignore
+        if self.monitor.startswith('test/'):
+            self._maybe_update(trainer, pl_module)
+
+    def on_fit_end(self, trainer: L.Trainer, pl_module):  # type: ignore
+        self._save_if_needed(trainer)
+
+    def on_test_end(self, trainer: L.Trainer, pl_module):  # type: ignore
+        # If monitoring test metrics but tests are not executed during fit, save after test run
+        if self.monitor.startswith('test/'):
+            self._save_if_needed(trainer)
+
+    def _save_if_needed(self, trainer: L.Trainer):
+        if self._saved_once:
+            return
+        is_global_zero = getattr(trainer, 'is_global_zero', True)
+        if not is_global_zero:
+            return
+        if self._best_state is None:
+            if self.verbose:
+                print(f"[SaveBestAtEnd] No metric '{self.monitor}' recorded; nothing to save.")
+            return
+        dirpath = self.dirpath or trainer.default_root_dir
+        os.makedirs(dirpath, exist_ok=True)
+        safe_monitor = self.monitor.replace('/', '_')
+        fname = self.filename.format(monitor=safe_monitor, epoch=self._best_epoch, score=self._best_score)
+        path = os.path.join(dirpath, fname)
+        # include hyperparameters if available for compatibility with Lightning's load_from_checkpoint
+        hparams = {}
+        try:
+            # pl_module.hparams is a Namespace-like object if save_hyperparameters() was used
+            hparams = dict(getattr(trainer.lightning_module, 'hparams', {}) or {})
+        except Exception:
+            pass
+        ckpt = {
+            'state_dict': self._best_state,
+            'best_score': self._best_score,
+            'best_epoch': self._best_epoch,
+            'monitor': self.monitor,
+            'hyper_parameters': hparams,
+        }
+        torch.save(ckpt, path)
+        self._saved_once = True
+        if self.verbose:
+            print(f"[SaveBestAtEnd] Saved best checkpoint to: {path}", flush=True)
+
+
 def setup_trainer(args, monitor_metric: str) -> L.Trainer:
     """
     Setup PyTorch Lightning Trainer.
@@ -232,6 +345,7 @@ def setup_trainer(args, monitor_metric: str) -> L.Trainer:
         deterministic=False,
         gradient_clip_val=10.0,
         enable_progress_bar=enable_progress_bar,
+        enable_checkpointing=False,  # disable default/frequent checkpointing
     )
     
     return trainer
@@ -303,13 +417,10 @@ def main():
     # Decide which metric to monitor
     monitor_metric = 'val/acc'
     if getattr(args, 'use_test_as_val', False) and args.dataset is not None:
-        # Validation shares test -> trainer will log test metrics only during explicit test stage.
-        # We alias validation to test inside datamodule, so metrics emitted should still be 'val/acc'.
-        # If no separate val_set was created, we fallback to 'train/acc' during training for checkpointing.
-        # Check if datamodule actually has val_dataloader
+        # If no separate validation set exists, prefer monitoring test accuracy for final save.
         has_val = dm.val_dataloader() is not None
         if not has_val:
-            monitor_metric = 'train/acc'
+            monitor_metric = 'test/acc'
 
     # Setup model
     model = GraphSamplerActionModel(
