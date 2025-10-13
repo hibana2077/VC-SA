@@ -306,6 +306,7 @@ def parse_args() -> argparse.Namespace:
     b_group.add_argument('--frieren-beta', type=float, default=0.5, help='[compat] Initial residual gate beta (alias for SQuaRe-Fuse)')
     b_group.add_argument('--frieren-ortho', action='store_true', default=True, help='[compat] Orthonormalize projection each forward')
     b_group.add_argument('--no-frieren-ortho', dest='frieren_ortho', action='store_false', help='[compat] Disable orthonormalization')
+    b_group.add_argument('--wo-square', action='store_true', help='Disable SQuaRe-Fuse fusion block (ablation)')
 
     args = p.parse_args()
 
@@ -431,4 +432,5 @@ def get_default_config() -> dict:
     'frieren_num_dirs': 8,
     'frieren_beta': 0.5,
     'frieren_ortho': True,
+    'wo_square': False,
     }

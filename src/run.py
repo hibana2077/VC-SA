@@ -54,7 +54,7 @@ from lightning.pytorch.callbacks import LearningRateMonitor
 from lightning.pytorch.loggers import CSVLogger
 
 # Import modularized components
-from src.core import GraphSamplerActionModel, VideoDataModule
+from src.core import GraphSamplerActionModel, GraphSamplerActionModelNoSquare, VideoDataModule
 from src.core.data import create_datamodule_for
 from src.utils import parse_args
 
@@ -425,7 +425,8 @@ def main():
             monitor_metric = 'test/acc'
 
     # Setup model
-    model = GraphSamplerActionModel(
+    ModelCls = GraphSamplerActionModelNoSquare if getattr(args, 'wo_square', False) else GraphSamplerActionModel
+    model = ModelCls(
         num_classes=args.num_classes,
         frames_per_clip=args.frames_per_clip,
         frame_topk=args.frame_topk,

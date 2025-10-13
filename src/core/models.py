@@ -385,3 +385,211 @@ class GraphSamplerActionModel(L.LightningModule):
             self.log('square/beta', beta_val, on_epoch=True, prog_bar=False)
         except Exception:
             pass
+
+
+class GraphSamplerActionModelNoSquare(L.LightningModule):
+    """
+    Ablation variant of the action model without SQuaRe-Fuse.
+
+    It keeps the same backbone and classifier but replaces the fusion block
+    with simple mean pooling over time and tokens.
+
+    Constructor signature matches GraphSamplerActionModel for CLI drop-in.
+    """
+
+    def __init__(
+        self,
+        num_classes: int,
+        frames_per_clip: int,
+        frame_topk: int,
+        token_topk: int,
+        vit_name: str = 'vit_base_patch16_224',
+        vit_pretrained: bool = True,
+        lr: float = 5e-4,
+        weight_decay: float = 0.05,
+        freeze_backbone: bool = False,
+        tau_frame: float = 1.0,
+        tau_token: float = 0.7,
+        graph_knn: int = 8,
+        graph_tw: int = 2,
+        graph_layers: int = 1,
+        use_gat: bool = True,
+        label_smoothing: float = 0.0,
+        test_each_epoch: bool = True,
+        # Compatibility args (ignored here)
+        frieren_num_dirs: int = 8,
+        frieren_beta: float = 0.5,
+        frieren_ortho: bool = True,
+    ):
+        super().__init__()
+        # Save only relevant hparams to avoid exposing unused frieren_* in checkpoints
+        self.save_hyperparameters(
+            {
+                'num_classes': num_classes,
+                'frames_per_clip': frames_per_clip,
+                'frame_topk': frame_topk,
+                'token_topk': token_topk,
+                'vit_name': vit_name,
+                'vit_pretrained': vit_pretrained,
+                'lr': lr,
+                'weight_decay': weight_decay,
+                'freeze_backbone': freeze_backbone,
+                'tau_frame': tau_frame,
+                'tau_token': tau_token,
+                'graph_knn': graph_knn,
+                'graph_tw': graph_tw,
+                'graph_layers': graph_layers,
+                'use_gat': use_gat,
+                'label_smoothing': label_smoothing,
+                'test_each_epoch': test_each_epoch,
+            }
+        )
+
+        # Backbone
+        self.backbone = ViTTokenBackbone(
+            vit_name,
+            vit_pretrained,
+            freeze_backbone,
+        )
+
+        # Dimensions
+        d_model, _ = self._probe_backbone_dims()
+
+        # Classifier identical to main model
+        self.cls_head = nn.Sequential(
+            nn.RMSNorm(d_model),
+            nn.Linear(d_model, 2 * d_model),
+            nn.GELU(),
+            nn.Dropout(0.1),
+            nn.Linear(2 * d_model, num_classes),
+        )
+
+        # Loss
+        self.criterion = (
+            nn.CrossEntropyLoss(label_smoothing=label_smoothing)
+            if label_smoothing > 0
+            else nn.CrossEntropyLoss()
+        )
+
+        self.test_each_epoch = test_each_epoch
+
+    def _probe_backbone_dims(self) -> Tuple[int, int]:
+        with torch.no_grad():
+            dummy = torch.zeros(1, 3, 224, 224)
+            tokens = self.backbone(dummy)
+            d_model = tokens.shape[-1]
+            n_tokens = tokens.shape[1]
+        return d_model, n_tokens
+
+    def configure_optimizers(self):
+        lr = self.hparams.lr
+        wd = self.hparams.weight_decay
+        param_groups = [
+            {
+                'params': [
+                    p for n, p in self.named_parameters()
+                    if p.requires_grad and 'backbone' in n
+                ],
+                'lr': lr * 0.5,
+                'weight_decay': wd,
+            },
+            {
+                'params': [
+                    p for n, p in self.named_parameters()
+                    if p.requires_grad and 'backbone' not in n
+                ],
+                'lr': lr,
+                'weight_decay': wd,
+            },
+        ]
+
+        optimizer = torch.optim.AdamW(param_groups, lr=lr, weight_decay=wd)
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+            optimizer,
+            T_max=self.trainer.max_epochs,
+        )
+        return {"optimizer": optimizer, "lr_scheduler": scheduler}
+
+    def forward(self, clip: torch.Tensor) -> torch.Tensor:
+        B, T, C, H, W = clip.shape
+        x = clip.view(B * T, C, H, W)
+        tokens = self.backbone(x)  # [B*T, N, D]
+        N = tokens.shape[1]
+        D = tokens.shape[2]
+        tokens = tokens.view(B, T, N, D)
+        # No fusion: simple mean pooling over time and tokens
+        feat = tokens.mean(dim=(1, 2))  # [B, D]
+        logits = self.cls_head(feat)
+        return logits
+
+    def training_step(self, batch, batch_idx):
+        clip, label = batch
+        logits = self(clip)
+        loss = self.criterion(logits, label)
+        acc = (logits.argmax(dim=-1) == label).float().mean()
+        self.log('train/loss', loss, prog_bar=True, on_step=True, on_epoch=True)
+        self.log('train/acc', acc, prog_bar=True, on_step=True, on_epoch=True)
+        return loss
+
+    def _grad_global_norm(self) -> float:
+        total = 0.0
+        for p in self.parameters():
+            if p.grad is not None:
+                param_norm = p.grad.data.norm(2)
+                total += param_norm.item() ** 2
+        return total ** 0.5
+
+    def on_after_backward(self):
+        pre = self._grad_global_norm()
+        self.log('train/grad_norm_pre_clip', pre, on_step=True, prog_bar=True)
+
+    def on_after_optimizer_step(self, optimizer):
+        post = self._grad_global_norm()
+        self.log('train/grad_norm_post_clip', post, on_step=True, prog_bar=False)
+
+    def validation_step(self, batch, batch_idx):
+        clip, label = batch
+        logits = self(clip)
+        loss = self.criterion(logits, label)
+        acc = (logits.argmax(dim=-1) == label).float().mean()
+        self.log('val/loss', loss, prog_bar=True, on_epoch=True)
+        self.log('val/acc', acc, prog_bar=True, on_epoch=True)
+        return {'val_loss': loss, 'val_acc': acc}
+
+    def test_step(self, batch, batch_idx):
+        clip, label = batch
+        logits = self(clip)
+        loss = self.criterion(logits, label)
+        acc = (logits.argmax(dim=-1) == label).float().mean()
+        self.log('test/loss', loss, prog_bar=False, on_epoch=True)
+        self.log('test/acc', acc, prog_bar=False, on_epoch=True)
+        return {'test_loss': loss, 'test_acc': acc}
+
+    def on_train_epoch_end(self):
+        if not self.test_each_epoch:
+            return
+        datamodule = self.trainer.datamodule
+        test_loader = datamodule.test_dataloader()
+        self.eval()
+        total, correct, losses = 0, 0, []
+        criterion = self.criterion
+        with torch.no_grad():
+            for clip, label in test_loader:
+                clip = clip.to(self.device)
+                label = label.to(self.device)
+                logits = self(clip)
+                loss = criterion(logits, label)
+                losses.append(loss.detach())
+                pred = logits.argmax(dim=-1)
+                correct += (pred == label).sum().item()
+                total += label.size(0)
+        if total > 0:
+            test_acc = correct / total
+            test_loss = torch.stack(losses).mean().item() if losses else 0.0
+            self.log('epoch_test/acc', test_acc, prog_bar=True)
+            self.log('epoch_test/loss', test_loss, prog_bar=False)
+        self.train()
+
+    def on_validation_epoch_end(self):
+        # No square/beta metric for this ablation model
+        return None

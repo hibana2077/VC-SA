@@ -1,6 +1,6 @@
 """Core modules for Video Action Recognition."""
 
-from .models import ViTTokenBackbone, GraphSamplerActionModel
+from .models import ViTTokenBackbone, GraphSamplerActionModel, GraphSamplerActionModelNoSquare
 from .data import (
     VideoRecord,
     VideoCSVAnnotation,
@@ -12,6 +12,7 @@ from .data import (
 __all__ = [
     "ViTTokenBackbone",
     "GraphSamplerActionModel",
+    "GraphSamplerActionModelNoSquare",
     "VideoRecord",
     "VideoCSVAnnotation",
     "FrameCache",
