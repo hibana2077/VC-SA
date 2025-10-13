@@ -249,6 +249,28 @@ def prepare_ssv2_annotations(
     def _template_to_class_name(t: str) -> str:
         return _normalize_bracket_tokens(t)
 
+    def _canonicalize_label(text: str) -> str:
+        """Generate a canonical key for matching labels between labels.json and
+        split templates/answers.
+
+        Steps:
+        - Remove bracket tokens and lowercase their contents
+        - Lowercase the whole string (handles capitalization mismatches)
+        - Collapse whitespace
+        """
+        # Remove bracket tokens first
+        no_brackets = _normalize_bracket_tokens(text)
+        # Lowercase whole string and collapse whitespace
+        canon = re.sub(r"\s+", " ", no_brackets.strip().lower())
+        return canon
+
+    # Build canonical lookup to be robust to capitalization/template variants
+    canonical_to_id: Dict[str, int] = {}
+    for orig_name, cid in name_to_id.items():
+        canon = _canonicalize_label(orig_name)
+        # In the rare case of collisions, keep the first occurrence
+        canonical_to_id.setdefault(canon, cid)
+
     def _write_split(json_file: Path, out_csv: Path):
         with json_file.open("r", encoding="utf-8") as f:
             items = json.load(f)
@@ -260,13 +282,13 @@ def prepare_ssv2_annotations(
                 if template is None:
                     raise ValueError(f"Missing 'template' for item id={vid_id} in {json_file}")
                 class_name = _template_to_class_name(template)
-                if class_name not in name_to_id:
-                    # Sometimes labels.json already uses the template form without brackets,
-                    # but if there's a mismatch, provide a clear error.
+                canon = _canonicalize_label(class_name)
+                if canon not in canonical_to_id:
+                    # Provide a clear error with canonical form to help debugging
                     raise KeyError(
-                        f"Class name '{class_name}' not found in labels.json."
+                        f"Class name '{class_name}' (canonical: '{canon}') not found in labels.json."
                     )
-                cid = name_to_id[class_name]
+                cid = canonical_to_id[canon]
                 video_path = (vids_dir / f"{vid_id}.webm").resolve()
                 writer.writerow([str(video_path), cid])
 
@@ -316,20 +338,24 @@ def prepare_ssv2_annotations(
                 raise KeyError(
                     f"No test answer found for id={vid_id} in {test_ans}."
                 )
-            # Normalize in case answers contain bracketed tokens
+            # Normalize then canonicalize to handle capitalization/brackets mismatches
             cls_name_norm = _template_to_class_name(cls_name)
-            if cls_name_norm not in name_to_id:
+            canon = _canonicalize_label(cls_name_norm)
+            if canon not in canonical_to_id:
                 raise KeyError(
-                    f"Test class name '{cls_name}' (normalized: '{cls_name_norm}') not found in labels.json."
+                    f"Test class name '{cls_name}' (canonical: '{canon}') not found in labels.json."
                 )
-            cid = name_to_id[cls_name_norm]
+            cid = canonical_to_id[canon]
             video_path = (vids_dir / f"{vid_id}.webm").resolve()
             writer.writerow([str(video_path), cid])
 
     # Save mapping for reference
     mapping_file = cache_path / "ssv2_label_mapping.json"
     with mapping_file.open("w", encoding="utf-8") as f:
-        json.dump({"label_to_id": name_to_id}, f, ensure_ascii=False, indent=2)
+        json.dump({
+            "label_to_id": name_to_id,
+            "canonical_label_to_id": canonical_to_id
+        }, f, ensure_ascii=False, indent=2)
 
     return {
         "train": str(out_train),
