@@ -84,10 +84,18 @@ class SimpleVideoDataset(Dataset):
         Returns:
             List of frame indices to sample
         """
-        if total <= self.num_frames:
-            return list(range(total))
-        
-        # Uniform sampling
+        # Always return exactly self.num_frames indices
+        if total <= 0:
+            return []
+        if total < self.num_frames:
+            # Repeat indices to reach desired length (stable and simple)
+            idxs: List[int] = list(range(total))
+            # Repeat whole cycle until sufficient length
+            while len(idxs) < self.num_frames:
+                idxs.extend(idxs)
+            return idxs[:self.num_frames]
+
+        # Uniform sampling for longer videos
         stride = total / self.num_frames
         return [int(stride * i + stride * 0.5) for i in range(self.num_frames)]
     
@@ -117,7 +125,13 @@ class SimpleVideoDataset(Dataset):
         if len(frames) == 0:
             raise RuntimeError(f"No frames extracted for {video_path}")
         
-        clip = torch.stack(frames, dim=0)  # [T, C, H, W]
+        # Safety: if decoder returned fewer than requested frames (shouldn't happen),
+        # pad by repeating the last frame.
+        if len(frames) < self.num_frames and len(frames) > 0:
+            last = frames[-1]
+            frames.extend([last] * (self.num_frames - len(frames)))
+
+        clip = torch.stack(frames, dim=0).contiguous()  # [T, C, H, W]
         return clip
     
     def _load_from_cache(self, frame_files: List[Path]) -> List[torch.Tensor]:
