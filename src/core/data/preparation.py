@@ -12,6 +12,7 @@ from __future__ import annotations
 import csv
 import json
 import random
+import re
 from pathlib import Path
 from typing import Optional, Dict
 
@@ -222,15 +223,31 @@ def prepare_ssv2_annotations(
     # Normalize to int ids
     name_to_id: Dict[str, int] = {k: int(v) for k, v in name_to_id_str.items()}
 
+    def _normalize_bracket_tokens(text: str) -> str:
+        """Convert SSV2 templates by removing square brackets and lowercasing
+        the content inside brackets.
+
+        Examples:
+            - "Holding [something] next to [something]" ->
+              "Holding something next to something"
+            - "Taking [one of many similar things on the table]" ->
+              "Taking one of many similar things on the table"
+        """
+
+        def repl(m: re.Match) -> str:
+            inner = m.group(1)
+            # lower-case the placeholder content and trim whitespace
+            return inner.strip().lower()
+
+        # Replace any [ ... ] with its lowercased inner content
+        normalized = re.sub(r"\[([^\]]+)\]", repl, text)
+        # Collapse multiple spaces and trim
+        normalized = re.sub(r"\s+", " ", normalized).strip()
+        return normalized
+
+    # Backward-compatible name used below
     def _template_to_class_name(t: str) -> str:
-        # Convert templates like "Holding [something] next to [something]"
-        # to class names "Holding something next to something".
-        # Handle [Something] variant too.
-        return (
-            t.replace("[something]", "something")
-             .replace("[Something]", "something")
-             .strip()
-        )
+        return _normalize_bracket_tokens(t)
 
     def _write_split(json_file: Path, out_csv: Path):
         with json_file.open("r", encoding="utf-8") as f:
@@ -299,11 +316,13 @@ def prepare_ssv2_annotations(
                 raise KeyError(
                     f"No test answer found for id={vid_id} in {test_ans}."
                 )
-            if cls_name not in name_to_id:
+            # Normalize in case answers contain bracketed tokens
+            cls_name_norm = _template_to_class_name(cls_name)
+            if cls_name_norm not in name_to_id:
                 raise KeyError(
-                    f"Test class name '{cls_name}' not found in labels.json."
+                    f"Test class name '{cls_name}' (normalized: '{cls_name_norm}') not found in labels.json."
                 )
-            cid = name_to_id[cls_name]
+            cid = name_to_id[cls_name_norm]
             video_path = (vids_dir / f"{vid_id}.webm").resolve()
             writer.writerow([str(video_path), cid])
 
