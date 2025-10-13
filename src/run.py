@@ -392,6 +392,8 @@ def main():
                 mapping_file = Path(args.anno_cache) / 'hmdb51_label_mapping.json'
             elif dataset_name.lower() == 'diving48':
                 mapping_file = Path(args.anno_cache) / 'diving48_label_mapping.json'
+            elif dataset_name.lower() == 'ssv2':
+                mapping_file = Path(args.anno_cache) / 'ssv2_label_mapping.json'
             if mapping_file and mapping_file.is_file():
                 import json
                 with mapping_file.open('r', encoding='utf-8') as f:
